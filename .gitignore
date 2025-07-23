@@ -22,5 +22,8 @@
 **/*.pyc
 **/*.pyo
 **/.vscode
-
+**/mpath_raw
+**/interactions_raw
+**/schedule_raw
+*.json
 .DS_Store
