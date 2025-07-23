@@ -1,5 +1,23 @@
-# Ignore everything in subdirectories
-*/
+# Ignore everything by default
+*
 
-# But do not ignore files in the root directory
+# But include files in the root directory only
 !/*
+
+# Then re-ignore specific unwanted items even in root (optional)
+.idea/
+*.iml
+.DS_Store
+.env
+*.env
+
+# Ignore all subdirectory content, including cache and notebook checkpoints
+**/*
+!/*
+
+# These catch nested caches and metadata
+**/__pycache__/
+**/.ipynb_checkpoints/
+**/.idea/
+**/*.pyc
+**/*.pyo
