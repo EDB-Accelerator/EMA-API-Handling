@@ -1,0 +1,5 @@
+# Ignore everything in subdirectories
+*/
+
+# But do not ignore files in the root directory
+!/*
