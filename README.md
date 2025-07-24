@@ -73,20 +73,6 @@ python set_schedule_from_json.py upload_ready_YYYYMMDDTHHMMSS.json \
 * **Status –1 responses**: The script automatically retries; increase `--retries` if needed.
 * **Timezone issues**: All timestamps should be localised consistently (e.g., `US/Eastern`).
 
-## Suggested `.gitignore`
-
-```
-# Keys and credentials
-*.pem
-.env
-
-# Runtime files
-mpath_raw/
-upload_ready_*.json
-__pycache__/
-.venv/
-```
-
 ## License
 
 MIT License – see `LICENSE` for details.
