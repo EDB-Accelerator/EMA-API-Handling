@@ -26,13 +26,13 @@ Defaults fall back to environment variables and sensible paths.
 
 .
 ├── example.ipynb                     # End-to-end notebook demo
-├── get\_clients.py
-├── get\_data.py
-├── get\_interactions.py
-├── get\_schedule.py
-├── merge\_and\_push\_schedule.py
-├── schedule\_json\_builder.py
-├── set\_schedule\_from\_json.py
+├── get_clients.py
+├── get_data.py
+├── get_interactions.py
+├── get_schedule.py
+├── merge_and_push_schedule.py
+├── schedule_json_builder.py
+├── set_schedule_from_json.py
 └── README.md
 
 ```
