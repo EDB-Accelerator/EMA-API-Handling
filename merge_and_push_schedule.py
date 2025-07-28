@@ -51,31 +51,30 @@ from typing import Sequence
 
 # ───────────────────────────────────────────── 0 | CONFIGURATION
 BASE_URL = "https://m-path.io/API2"
-USER_CODE = os.getenv("MPATH_USERCODE")
-KEY_PRIV = Path(os.getenv("MPATH_PRIVKEY", Path.home() / ".mpath_private_key.pem"))
+DEFAULT_USER_CODE = os.getenv("MPATH_USERCODE")
+DEFAULT_private_key_path = Path(os.getenv("MPATH_PRIVKEY", Path.home() / ".mpath_private_key.pem"))
 
-if not USER_CODE or not KEY_PRIV.exists():
-    raise RuntimeError("MPATH_USERCODE or private key is missing.")
 
 # ───────────────────────────────────────────── 1 | JWT GENERATOR
-def _jwt(ttl_min: int = 5) -> str:
+def _jwt(user_code: str, private_key_path: Path, ttl_min: int = 5) -> str:
     """Generate a short-lived JWT for authenticated API calls."""
     exp = datetime.now(timezone.utc) + timedelta(minutes=ttl_min)
-    payload = {"exp": int(exp.timestamp()), "userCode": USER_CODE}
-    return jwt.encode(payload, KEY_PRIV.read_text(), algorithm="RS256")
+    payload = {"exp": int(exp.timestamp()), "userCode": user_code}
+    return jwt.encode(payload, private_key_path.read_text(), algorithm="RS256")
 
 # ───────────────────────────────────────────── 2 | API CALLS
-def _fetch_schedule(connection_id: int) -> list[dict]:
+def _fetch_schedule(connection_id: int, user_code: str, private_key_path: Path) -> list[dict]:
     """Fetch the existing schedule for a given connection."""
-    params = {"userCode": USER_CODE, "connectionId": connection_id, "JWT": _jwt()}
+    params = {"userCode": user_code, "connectionId": connection_id, "JWT": _jwt(user_code, private_key_path)}
     body = requests.get(f"{BASE_URL}/getSchedule", params=params, timeout=30).json()
     if body.get("status") != 1:
         raise RuntimeError(f"getSchedule failed: {body}")
     return body["schedule"]
 
-def _push_schedule(connection_id: int, entries: list[dict], retries=3) -> dict:
+def _push_schedule(connection_id: int, entries: list[dict],
+                   user_code: str, private_key_path: Path, retries=3) -> dict:
     """Push the updated schedule (merged) to m-Path."""
-    params = {"userCode": USER_CODE, "connectionId": connection_id, "JWT": _jwt()}
+    params = {"userCode": user_code, "connectionId": connection_id, "JWT": _jwt(user_code, private_key_path)}
     data = {"scheduleJSON": json.dumps(entries, ensure_ascii=False)}
 
     for attempt in range(1, retries + 1):
@@ -172,19 +171,31 @@ def _clean(rec: dict) -> dict:
     return out
 
 # ───────────────────────────────────────────── 5 | MERGE AND PUSH
-def merge_and_push(*, connection_id: int, new_entries: list[dict]) -> dict:
+def merge_and_push(*,
+                   connection_id: int,
+                   new_entries: list[dict],
+                   user_code: str = DEFAULT_USER_CODE,
+                   private_key_path: Path = DEFAULT_private_key_path) -> dict:
     """
     Merge new entries with current schedule and push result.
 
     Args:
         connection_id: Target m-Path connection ID.
         new_entries: List of entries created by build_entries.
+        user_code: 5-char practitioner code.
+        private_key_path: Path to PEM private key file.
 
     Returns:
         API response from setSchedule.
     """
-    current = [_clean(r) for r in _fetch_schedule(connection_id)]
-    return _push_schedule(connection_id, current + new_entries)
+    if not user_code:
+        raise ValueError("user_code is required (or set MPATH_USERCODE env variable).")
+    if not private_key_path.exists():
+        raise FileNotFoundError(f"RSA private key not found: {private_key_path}")
+
+    current = [_clean(r) for r in _fetch_schedule(connection_id, user_code, private_key_path)]
+    return _push_schedule(connection_id, current + new_entries, user_code, private_key_path)
+
 
 # ───────────────────────────────────────────── 6 | CLI DEMO (OPTIONAL)
 if __name__ == "__main__":

@@ -32,12 +32,11 @@ import pandas as pd
 
 # ─────────────────────────────────────────────── 0 | SETTINGS
 # Define key file paths and base output directory
-PRIVATE_KEY_PEM = Path.home() / ".mpath_private_key.pem"
-PUBLIC_KEY_PEM = Path.home() / ".mpath_public_key.pem"
-BASE_DUMP_DIR = Path("mpath_raw").expanduser()
+DEFAULT_PRIVATE_KEY_PEM = Path.home() / ".mpath_private_key.pem"
+DEFAULT_BASE_DUMP_DIR = Path("mpath_raw").expanduser()
 
 # ─────────────────────────────────────────────── 2 | JWT
-def make_jwt(user_code, ttl_minutes: int = 5) -> str:
+def make_jwt(user_code, ttl_minutes: int = 5, private_key_path: Path = DEFAULT_PRIVATE_KEY_PEM) -> str:
     """
     Generate a signed JWT for user authentication.
     
@@ -48,7 +47,7 @@ def make_jwt(user_code, ttl_minutes: int = 5) -> str:
     Returns:
         str: Encoded JWT string.
     """
-    private_key = PRIVATE_KEY_PEM.read_text()
+    private_key = DEFAULT_PRIVATE_KEY_PEM.read_text()
     exp = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
     payload = {"exp": int(exp.timestamp()), "userCode": user_code}
     return jwt.encode(payload, private_key, algorithm="RS256")
@@ -92,7 +91,11 @@ def _stamp_and_dump(body: dict, key: str, connection_id: int, conn_dir: Path) ->
     print(f"✓ Raw payload saved → {out_json}")
     return body[key]
 
-def get_data(user_code=None, connection_id=None, max_retries: int = 3) -> tuple[list[dict], Path]:
+def get_data(user_code=None,
+             connection_id=None,
+             max_retries: int = 3,
+             base_dump_dir: Path = DEFAULT_BASE_DUMP_DIR,
+             private_key_path: Path = DEFAULT_PRIVATE_KEY_PEM) -> tuple[list[dict], Path]:
     """
     Fetch raw data from m-Path API with retry logic.
 
@@ -100,15 +103,17 @@ def get_data(user_code=None, connection_id=None, max_retries: int = 3) -> tuple[
         user_code (str): m-Path user code.
         connection_id (int): Connection ID to retrieve data for.
         max_retries (int): Number of retry attempts on failure.
+        base_dump_dir (Path): Base directory for output files.
+        private_key_path (Path): Path to PEM private key.
 
     Returns:
         tuple: (List of raw data rows, output directory path)
     """
-    conn_dir = BASE_DUMP_DIR / str(connection_id)
+    conn_dir = base_dump_dir / str(connection_id)
     conn_dir.mkdir(parents=True, exist_ok=True)
 
     for attempt in range(1, max_retries + 1):
-        token = make_jwt(user_code=user_code)
+        token = make_jwt(user_code=user_code, private_key_path=private_key_path)
         body = _call_raw("getData", userCode=user_code, JWT=token, connectionId=connection_id)
 
         status = body.get("status")
@@ -122,6 +127,7 @@ def get_data(user_code=None, connection_id=None, max_retries: int = 3) -> tuple[
                 continue
             raise RuntimeError("API gave status –1 after max retries.")
         raise RuntimeError(f"Unexpected API status: {status}\n{json.dumps(body, 2)}")
+
 
 # ─────────────────────────────────────────────── 4 | FLATTEN UTILITIES
 def _to_scalar(val):

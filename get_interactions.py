@@ -47,25 +47,30 @@ import pandas as pd
 
 # ───────────────────────────────────────────── 0 | PATHS & CONSTANTS
 BASE_URL = "https://m-path.io/API2"
-KEY_PRIV = Path(os.getenv("MPATH_PRIVKEY", Path.home() / ".mpath_private_key.pem"))
-BASE_OUT = Path("interactions_raw").expanduser()
+DEFAULT_PRIVKEY_PATH = Path.home() / ".mpath_private_key.pem"
+DEFAULT_BASE_OUT = Path("interactions_raw").expanduser()
 
 # ───────────────────────────────────────────── 1 | LOW-LEVEL HELPERS
-def _make_jwt(user_code: str, ttl_min: int = 5) -> str:
+def _make_jwt(user_code: str, ttl_min: int = 5, privkey_path: Path = DEFAULT_PRIVKEY_PATH) -> str:
     """Generate a short-lived signed JWT token."""
     exp = datetime.now(timezone.utc) + timedelta(minutes=ttl_min)
     payload = {"exp": int(exp.timestamp()), "userCode": user_code}
-    return jwt.encode(payload, KEY_PRIV.read_text(), algorithm="RS256")
+    return jwt.encode(payload, privkey_path.read_text(), algorithm="RS256")
 
 def _to_scalar(v):
     """Convert lists and dicts to JSON strings for CSV compatibility."""
     return json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v
 
 # ───────────────────────────────────────────── 2 | API REQUEST
-def _fetch_interactions(user_code: str, connection_id: int, retries: int = 3) -> list[dict]:
+def _fetch_interactions(user_code: str, connection_id: int, retries: int = 3,
+                        privkey_path: Path = DEFAULT_PRIVKEY_PATH) -> list[dict]:
     """Fetch interaction data from the API with retry on status –1."""
     for attempt in range(1, retries + 1):
-        params = {"userCode": user_code, "connectionId": connection_id, "JWT": _make_jwt(user_code)}
+        params = {
+            "userCode": user_code,
+            "connectionId": connection_id,
+            "JWT": _make_jwt(user_code, privkey_path=privkey_path)
+        }
         body = requests.get(f"{BASE_URL}/getInteractions", params=params, timeout=30).json()
 
         status = body.get("status")
@@ -159,8 +164,12 @@ def _flatten_and_save_roots(roots: list[dict], connection_id: int, out_dir: Path
     return dfs
 
 # ───────────────────────────────────────────── 5 | PUBLIC FUNCTION
-def get_interactions(*, connection_id: int | None = None, user_code: str | None = None,
-                     retries: int = 3, out_base: Path | str = BASE_OUT
+def get_interactions(*,
+                     connection_id: int | None = None,
+                     user_code: str | None = None,
+                     retries: int = 3,
+                     out_base: Path | str = DEFAULT_BASE_OUT,
+                     private_key_path: Path = DEFAULT_PRIVKEY_PATH
                     ) -> dict[str, pd.DataFrame]:
     """
     Retrieve and save interaction data for a single connection.
@@ -170,6 +179,7 @@ def get_interactions(*, connection_id: int | None = None, user_code: str | None 
         user_code: Practitioner code (5-character).
         retries: Retry count on API status –1.
         out_base: Output directory.
+        privkey_path: Path to RSA private key.
 
     Returns:
         Dictionary mapping root container titles to DataFrames.
@@ -185,14 +195,14 @@ def get_interactions(*, connection_id: int | None = None, user_code: str | None 
         else:
             connection_id = int(input("Enter numeric CONNECTION ID: ").strip())
 
-    if not KEY_PRIV.exists():
-        raise FileNotFoundError(f"RSA private key not found: {KEY_PRIV}")
+    if not private_key_path.exists():
+        raise FileNotFoundError(f"RSA private key not found: {private_key_path}")
 
     out_dir = Path(out_base) / str(connection_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Fetching interactions for connection {connection_id} …")
-    roots = _fetch_interactions(user_code, connection_id, retries=retries)
+    roots = _fetch_interactions(user_code, connection_id, retries=retries, privkey_path=private_key_path)
     return _flatten_and_save_roots(roots, connection_id, out_dir)
 
 # ───────────────────────────────────────────── 6 | CLI HANDLER

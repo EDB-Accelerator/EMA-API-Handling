@@ -2,10 +2,28 @@
 """
 get_clients.py – download raw client metadata from m-Path and save JSON files (no flattening)
 Author: Kyunghun Lee (kyunghun.lee@nih.gov)
-Updated: 2025-07-24
+Updated: 2025-07-28
 
 MIT License
 Copyright (c) 2025 Kyunghun Lee
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 """
 
 from __future__ import annotations
@@ -15,41 +33,68 @@ import json
 import os
 import sys
 import time
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Tuple, List, Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import jwt
 import requests
 
-# ─────────────────────────────────────────────── 0 | SETTINGS
-PRIVATE_KEY_PEM: Path = Path.home() / ".mpath_private_key.pem"
-PUBLIC_KEY_PEM: Path  = Path.home() / ".mpath_public_key.pem"  # kept for parity
-BASE_DUMP_DIR: Path   = Path("mpath_clients").expanduser()
-BASE_URL: str         = "https://dashboard.m-path.io/API2"
-# BASE_URL: str       = "https://m-path.io/API2"  # legacy
+__all__ = [
+    "MPathConfig",
+    "get_clients",
+    "make_jwt",
+    "normalize_changed_after",
+    "resolve_user_code",
+]
 
-DEFAULT_CHANGED_AFTER_UTC = "2024-01-01 00:00:00"  # Safe default per Stijn’s note
+# ─────────────────────────────────────────────── 0 | CONFIG
+
+@dataclass(frozen=True)
+class MPathConfig:
+    """Container for paths and base URL.
+
+    You can pass a custom instance into any high-level function (e.g., ``get_clients``)
+    to override defaults when running from Jupyter or other scripts.
+    """
+
+    private_key_pem: Path = Path.home() / ".mpath_private_key.pem"
+    public_key_pem: Path = Path.home() / ".mpath_public_key.pem"  # kept for parity/debugging
+    base_dump_dir: Path = Path("mpath_clients").expanduser()
+    base_url: str = "https://dashboard.m-path.io/API2"  # alt: "https://m-path.io/API2"
+
+
+# Default values used unless you pass a custom config
+GLOBAL_CONFIG = MPathConfig()
+DEFAULT_CHANGED_AFTER_UTC = "2024-01-01 00:00:00"
+
 
 # ─────────────────────────────────────────────── 1 | JWT
 
-def make_jwt(user_code: str, ttl_minutes: int = 5) -> str:
-    """Generate a signed JWT for m-Path authentication."""
-    private_key = PRIVATE_KEY_PEM.read_text()
+def make_jwt(user_code: str, ttl_minutes: int = 5, *, config: MPathConfig = GLOBAL_CONFIG) -> str:
+    """Generate a signed JWT for m-Path authentication.
+
+    Args:
+        user_code: 5-character m-Path user code.
+        ttl_minutes: Token lifetime in minutes.
+        config: ``MPathConfig`` specifying the private key path.
+
+    Returns:
+        Encoded JWT string.
+    """
+    private_key = config.private_key_pem.read_text()
     exp = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
     payload = {"exp": int(exp.timestamp()), "userCode": user_code}
     return jwt.encode(payload, private_key, algorithm="RS256")
 
+
 # ─────────────────────────────────────────────── 2 | HELPERS
 
 def normalize_changed_after(dt_str: Optional[str]) -> Optional[str]:
-    """
-    Normalize a user-supplied datetime string to 'YYYY-MM-DD HH:MM:SS' (UTC).
-    - If dt_str is None, return the DEFAULT_CHANGED_AFTER_UTC.
-    - Accepts:
-        * 'YYYY-MM-DD' → treated as 'YYYY-MM-DD 00:00:00'
-        * 'YYYY-MM-DD HH:MM:SS'
-    Raises ValueError on invalid format.
+    """Normalize a user-supplied datetime string to 'YYYY-MM-DD HH:MM:SS' (UTC).
+
+    Accepts either 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'. ``None`` or empty → default.
     """
     if dt_str is None:
         return DEFAULT_CHANGED_AFTER_UTC
@@ -71,46 +116,60 @@ def normalize_changed_after(dt_str: Optional[str]) -> Optional[str]:
         return d.strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
         raise ValueError(
-            f"changedAfterUTC must be 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'. Got: {dt_str}"
+            "changedAfterUTC must be 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'. "
+            f"Got: {dt_str}"
         )
 
+
 def _sanitize_url(url: str) -> str:
-    """Hide JWT token when printing URLs."""
-    # naive masking: replace 'JWT=' value with '<redacted>'
+    """Redact JWT token when printing URLs for logging/debugging."""
     if "JWT=" in url:
-        parts = url.split("JWT=")
-        head = parts[0]
-        tail = parts[1]
-        # Tail may have '&'; keep structure but replace token
+        head, tail = url.split("JWT=", 1)
         rest = tail.split("&", 1)
         if len(rest) == 2:
-            token, rest_params = rest
+            _token, rest_params = rest
             return f"{head}JWT=<redacted>&{rest_params}"
-        else:
-            return f"{head}JWT=<redacted>"
+        return f"{head}JWT=<redacted>"
     return url
+
 
 # ─────────────────────────────────────────────── 3 | API CORE
 
-def _call_raw(endpoint: str, *, show_url: bool = False, **params) -> Dict:
+def _call_raw(endpoint: str, *, show_url: bool = False, config: MPathConfig = GLOBAL_CONFIG, **params) -> Dict:
     """Perform GET request to the specified m-Path API endpoint.
 
-    If show_url=True, prints the fully-expanded URL *before* the request is sent (JWT redacted).
+    Args:
+        endpoint: API method name (e.g., "getClients").
+        show_url: If True, prints the fully-expanded URL (JWT redacted) before the request.
+        config: ``MPathConfig`` providing the base URL.
+        **params: Query parameters to be sent.
+
+    Returns:
+        Parsed JSON response as dict.
     """
-    # Build the prepared request so we can show the exact URL first
-    req = requests.Request("GET", f"{BASE_URL}/{endpoint}", params=params)
+    req = requests.Request("GET", f"{config.base_url}/{endpoint}", params=params)
     prepped = req.prepare()
     if show_url:
         print(f"→ GET {_sanitize_url(prepped.url)}")
 
-    # Send it
     with requests.Session() as s:
         resp = s.send(prepped, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
+
 def _stamp_and_dump(body: Dict, primary_key: str, out_dir: Path, suffix: str) -> List[Dict]:
-    """Append download timestamp and save raw JSON payload."""
+    """Append download timestamp, then save raw JSON payload to disk.
+
+    Args:
+        body: Entire API response body.
+        primary_key: Top-level key in the response that holds the data list ("clients" here).
+        out_dir: Output directory.
+        suffix: String to include in the filename (e.g. a timestamp or changedAfter value).
+
+    Returns:
+        The list of rows extracted from the body.
+    """
     utc_now = datetime.now(timezone.utc)
     iso_now = utc_now.strftime("%Y%m%dT%H%M%SZ")
 
@@ -124,20 +183,33 @@ def _stamp_and_dump(body: Dict, primary_key: str, out_dir: Path, suffix: str) ->
     print(f"✓ Raw payload saved → {out_json}")
     return rows
 
+
 # ─────────────────────────────────────────────── 4 | HIGH-LEVEL FETCH
 
-def get_clients(user_code: str,
-                changed_after_utc: Optional[str] = None,
-                max_retries: int = 3,
-                show_url: bool = False,
-                include_changed_after: bool = True) -> Tuple[List[Dict], Path]:
-    """Fetch clients list from m-Path and dump JSON only.
+def get_clients(
+    user_code: str,
+    changed_after_utc: Optional[str] = None,
+    max_retries: int = 3,
+    show_url: bool = False,
+    include_changed_after: bool = True,
+    *,
+    config: MPathConfig = GLOBAL_CONFIG,
+) -> Tuple[List[Dict], Path]:
+    """Fetch client metadata from m-Path and dump raw JSON only.
 
-    Returns (rows, out_dir).
+    Args:
+        user_code: 5-character m-Path user code.
+        changed_after_utc: Filter by last-change UTC time (string). Use None for default.
+        max_retries: Max # of retries when API returns status -1.
+        show_url: Print expanded URL (JWT redacted) before sending.
+        include_changed_after: If False, omit the changedAfterUTC parameter entirely (fetch all).
+        config: ``MPathConfig`` overriding paths/URLs/output directory.
+
+    Returns:
+        (rows, out_dir): list of client records and the directory where JSON was written.
     """
-    out_dir = BASE_DUMP_DIR
+    out_dir = config.base_dump_dir
 
-    # Ensure correct format if we are sending changedAfterUTC
     if include_changed_after:
         changed_after_utc = normalize_changed_after(changed_after_utc)
         suffix = changed_after_utc.replace(" ", "_").replace(":", "")
@@ -146,17 +218,14 @@ def get_clients(user_code: str,
         suffix = "all"
 
     for attempt in range(1, max_retries + 1):
-        token = make_jwt(user_code=user_code)
-        params = {
-            "userCode": user_code,
-            "JWT": token,
-        }
+        token = make_jwt(user_code=user_code, config=config)
+        params = {"userCode": user_code, "JWT": token}
         if include_changed_after and changed_after_utc:
             params["changedAfterUTC"] = changed_after_utc
 
-        body = _call_raw("getClients", show_url=show_url, **params)
-
+        body = _call_raw("getClients", show_url=show_url, config=config, **params)
         status = body.get("status")
+
         if status == 1:
             rows = _stamp_and_dump(body, "clients", out_dir, suffix)
             return rows, out_dir
@@ -171,16 +240,16 @@ def get_clients(user_code: str,
         raise RuntimeError(f"Unexpected API status: {status}\n{json.dumps(body, indent=2)}")
 
 
-# ─────────────────────────────────────────────── 5 | USER CODE RESOLUTION
+# ─────────────────────────────────────────────── 5 | USER CODE RESOLUTION (CLI-ONLY)
 
 def resolve_user_code(cli_uc: Optional[str], auto_yes: bool = False) -> str:
-    """Resolve which user_code to use.
+    """Resolve which user_code to use (CLI helper).
 
     Priority:
-      1. CLI value (if given)
-      2. Environment variable MPATH_USERCODE (default 'rr7z8')
-         - confirm interactively unless --yes or non-interactive
-      3. Prompt user for input
+      1. CLI value if given
+      2. $MPATH_USERCODE environment variable (default fallback 'rr7z8')
+         - confirm unless --yes or stdin is non-interactive
+      3. Prompt the user
     """
     if cli_uc:
         return cli_uc
@@ -198,6 +267,7 @@ def resolve_user_code(cli_uc: Optional[str], auto_yes: bool = False) -> str:
         if len(uc) == 5:
             return uc
         print("Invalid length. Please enter exactly 5 characters.")
+
 
 # ─────────────────────────────────────────────── 6 | CLI
 
@@ -217,15 +287,35 @@ def _cli() -> None:
                         help="Skip confirmation prompts (use env/default silently).")
     parser.add_argument("--show-url", action="store_true",
                         help="Print the fully-expanded request URL before it is sent (JWT redacted).")
+
+    # Overrides for paths/URL/output directory
+    parser.add_argument("--privkey", type=Path, help="Path to private key PEM.")
+    parser.add_argument("--pubkey",  type=Path, help="Path to public  key PEM.")
+    parser.add_argument("--base-url", type=str,  help="Base API URL (e.g. https://m-path.io/API2).")
+    parser.add_argument("--outdir",   type=Path, help="Directory to dump raw JSON files.")
+
     args = parser.parse_args()
 
     user_code = resolve_user_code(args.user_code, auto_yes=args.yes)
 
-    rows, out_dir = get_clients(user_code=user_code,
-                                changed_after_utc=args.changed_after,
-                                max_retries=args.max_retries,
-                                show_url=args.show_url,
-                                include_changed_after=not args.all)
+    cfg = GLOBAL_CONFIG
+    if any([args.privkey, args.pubkey, args.base_url, args.outdir]):
+        cfg = replace(
+            cfg,
+            private_key_pem=args.privkey or cfg.private_key_pem,
+            public_key_pem=args.pubkey or cfg.public_key_pem,
+            base_url=args.base_url or cfg.base_url,
+            base_dump_dir=args.outdir or cfg.base_dump_dir,
+        )
+
+    rows, out_dir = get_clients(
+        user_code=user_code,
+        changed_after_utc=args.changed_after,
+        max_retries=args.max_retries,
+        show_url=args.show_url,
+        include_changed_after=not args.all,
+        config=cfg,
+    )
 
     print(f"Done. Rows: {len(rows)}")
     print(f"JSON files are in: {out_dir.resolve()}")
@@ -233,3 +323,4 @@ def _cli() -> None:
 
 if __name__ == "__main__":
     _cli()
+

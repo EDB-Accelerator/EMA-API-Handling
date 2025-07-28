@@ -60,7 +60,7 @@ def set_schedule(
     entries: List[dict],
     user_code: str,
     connection_id: int,
-    privkey_path: str | os.PathLike,
+    private_key_path: str | os.PathLike,
     *,
     minimal: bool = False,
     retries: int = 3,
@@ -71,7 +71,7 @@ def set_schedule(
     if minimal:
         entries = _minimalize(entries)
 
-    privkey = Path(privkey_path).expanduser().resolve()
+    privkey = Path(private_key_path).expanduser().resolve()
     if not privkey.is_file():
         raise FileNotFoundError(f"RSA private key not found: {privkey}")
 

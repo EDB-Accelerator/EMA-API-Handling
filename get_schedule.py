@@ -48,15 +48,15 @@ import pandas as pd
 
 # ───────────────────────────────────────────── 0 | PATHS & CONSTANTS
 BASE_URL = "https://m-path.io/API2"
-KEY_PRIV = Path(os.getenv("MPATH_PRIVKEY", Path.home() / ".mpath_private_key.pem"))
-BASE_OUT = Path("schedule_raw").expanduser()  # Base directory for raw and CSV output
+DEFAULT_PRIVKEY_PATH = Path.home() / ".mpath_private_key.pem"
+DEFAULT_BASE_OUT = Path("schedule_raw").expanduser()
 
 # ───────────────────────────────────────────── 1 | LOW-LEVEL HELPERS
-def _make_jwt(user_code: str, ttl_min: int = 5) -> str:
+def _make_jwt(user_code: str, ttl_min: int = 5, privkey_path: Path = DEFAULT_PRIVKEY_PATH) -> str:
     """Generate a short-lived signed JWT token for m-Path API."""
     exp = datetime.now(timezone.utc) + timedelta(minutes=ttl_min)
     payload = {"exp": int(exp.timestamp()), "userCode": user_code}
-    return jwt.encode(payload, KEY_PRIV.read_text(), algorithm="RS256")
+    return jwt.encode(payload, privkey_path.read_text(), algorithm="RS256")
 
 def _to_scalar(v):
     """Convert list or dict to JSON string for CSV compatibility."""
@@ -74,13 +74,14 @@ def _flatten(obj: dict, parent_key: str = "", sep: str = ".") -> dict:
     return out
 
 # ───────────────────────────────────────────── 2 | API FETCH
-def _fetch_schedule(user_code: str, connection_id: int, retries: int = 3) -> list[dict]:
+def _fetch_schedule(user_code: str, connection_id: int, retries: int = 3,
+                    private_key_path: Path = DEFAULT_PRIVKEY_PATH) -> list[dict]:
     """Fetch schedule entries from m-Path API, retry on status -1."""
     for attempt in range(1, retries + 1):
         params = {
             "userCode": user_code,
             "connectionId": connection_id,
-            "JWT": _make_jwt(user_code)
+            "JWT": _make_jwt(user_code, privkey_path=private_key_path)
         }
         body = requests.get(f"{BASE_URL}/getSchedule", params=params, timeout=30).json()
 
@@ -92,6 +93,7 @@ def _fetch_schedule(user_code: str, connection_id: int, retries: int = 3) -> lis
             time.sleep(5)
             continue
         raise RuntimeError(f"API error:\n{json.dumps(body, 2)}")
+
 
 # ───────────────────────────────────────────── 3 | SAVE / CONVERT
 _TS_FMT = "%Y-%m-%d %H:%M:%S"
@@ -144,8 +146,12 @@ def _save_schedule(entries: list[dict], connection_id: int, out_dir: Path,
     return df
 
 # ───────────────────────────────────────────── 4 | PUBLIC ENTRY POINT
-def get_schedule(*, connection_id: int | None = None, user_code: str | None = None,
-                 retries: int = 3, out_base: Path | str = BASE_OUT) -> pd.DataFrame:
+def get_schedule(*, connection_id: int | None = None,
+                 user_code: str | None = None,
+                 retries: int = 3,
+                 out_base: Path | str = DEFAULT_BASE_OUT,
+                 private_key_path: Path = DEFAULT_PRIVKEY_PATH
+                ) -> pd.DataFrame:
     """
     Fetch and save schedule data for a single m-Path connection.
 
@@ -154,6 +160,7 @@ def get_schedule(*, connection_id: int | None = None, user_code: str | None = No
         user_code: 5-character practitioner code.
         retries: Number of retry attempts for status –1.
         out_base: Output directory.
+        privkey_path: Path to RSA private key.
 
     Returns:
         Flattened pandas DataFrame with one row per schedule entry.
@@ -169,15 +176,16 @@ def get_schedule(*, connection_id: int | None = None, user_code: str | None = No
         else:
             connection_id = int(input("Enter numeric CONNECTION ID: ").strip())
 
-    if not KEY_PRIV.exists():
-        raise FileNotFoundError(f"RSA private key not found: {KEY_PRIV}")
+    if not private_key_path.exists():
+        raise FileNotFoundError(f"RSA private key not found: {private_key_path}")
 
     out_dir = Path(out_base) / str(connection_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Fetching schedule for connection {connection_id} …")
-    entries = _fetch_schedule(user_code, connection_id, retries=retries)
+    entries = _fetch_schedule(user_code, connection_id, retries=retries, private_key_path=private_key_path)
     return _save_schedule(entries, connection_id, out_dir)
+
 
 # ───────────────────────────────────────────── 5 | CLI HANDLER
 if __name__ == "__main__":
