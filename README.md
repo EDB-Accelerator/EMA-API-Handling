@@ -1,64 +1,71 @@
+# M‑Path API Utilities
 
-# M-Path API Utilities
+A small toolkit for downloading raw EMA data, inspecting interactions, managing schedules and uploading new beeps to the **m‑Path** platform — from **Python** *or* the command‑line.
 
-A small toolkit to download raw data, inspect interactions, manage schedules, and upload new beeps to the m-Path platform from Python or the command line.
+---
 
 ## Features
-- Download client metadata (`get_clients.py`) and save raw JSON per connection.
-- Download full connection datasets (`get_data.py`) and flatten them to CSV.
-- Retrieve interaction trees (`get_interactions.py`) and export each root container to CSV.
-- Pull an existing schedule (`get_schedule.py`) and flatten to CSV.
-- Build additional beep entries and push them safely (`merge_and_push_schedule.py`).
-- Combine and save entries to upload‑ready JSON (`schedule_json_builder.py`).
-- Upload schedules to m-Path via a secure, retry-safe client (`set_schedule_from_json.py`).
 
-All scripts accept **optional parameters** for:
-- RSA private key path (`privkey_path`)
-- Base output directory (`out_base` / `base_dump_dir`)
-- User code (`user_code`)
-- Connection ID (`connection_id`)
+| Capability                                | Script / Function                                       | Output                       |
+| ----------------------------------------- | ------------------------------------------------------- | ---------------------------- |
+| Download client metadata                  | `list_clients()` · **CLI:** `get-clients`               | one JSON file per connection |
+| Download full connection datasets         | `download_flattened_csv()` · **CLI:** `get-data`        | raw JSON + flattened CSV     |
+| Retrieve interaction trees                | `get_interactions()` · **CLI:** `get-interactions`      | raw JSON + one CSV per root  |
+| Pull existing schedule                    | `get_schedule()` · **CLI:** `get-schedule`              | raw JSON + single CSV        |
+| Build extra beep entries                  | `build_entries()`                                       | in‑memory `DataFrame`        |
+| Merge & push schedule                     | `merge_and_push_schedule()` · **CLI:** `merge-and-push` | API response JSON            |
+| Combine + save beeps to upload‑ready JSON | `save_upload_json()`                                    | JSON file                    |
+| Upload a schedule JSON                    | `set_schedule_from_json()` · **CLI:** `set-schedule`    | API response JSON            |
+
+All functions accept optional overrides for:
+
+* **`privkey_path`** – RSA private key (default `$HOME/.mpath_private_key.pem`)
+* **`user_code`** – short m‑Path user code
+* **`connection_id`** – numeric connection ID
+* **`out_base` / `base_dump_dir`** – root output folder
 
 Defaults fall back to environment variables and sensible paths.
 
-## Repository Structure
-
-```
-
-.
-├── example.ipynb                     # End-to-end notebook demo
-├── get_clients.py
-├── get_data.py
-├── get_interactions.py
-├── get_schedule.py
-├── merge_and_push_schedule.py
-├── schedule_json_builder.py
-├── set_schedule_from_json.py
-└── README.md
-
-```
+---
 
 ## Requirements
-- Python 3.9+
-- `pandas`, `requests`, `pyjwt`
-- `ipywidgets` (optional, for notebook UI)
 
-You also need an RSA key pair:
+* Python ≥ 3.9
+* `pandas`, `requests`, `pyjwt`
+* `ipywidgets` *(optional – notebook UI)*
+
+You’ll also need an RSA key pair accepted by your m‑Path instance:
+
+```text
+~/.mpath_private_key.pem
+~/.mpath_public_key.pem
 ```
 
-\~/.mpath\_private\_key.pem
-\~/.mpath\_public\_key.pem
+---
 
-````
+## Installation
 
-## Setup
+### 1 · From GitHub (recommended)
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-````
+# Using SSH (no password prompt if you have keys set up)
+pip install git+ssh://git@github.com/EDB-Accelerator/EMA-API-Handling.git@package-refactor
 
-Set convenient environment variables (optional but recommended):
+# …or via HTTPS
+git clone --branch package-refactor https://github.com/EDB-Accelerator/EMA-API-Handling.git
+cd EMA-API-Handling
+pip install -e .    # editable / developer install
+```
+
+### 2 · From a local path
+
+```bash
+pip install -e /path/to/EMA-API-Handling
+```
+
+> The editable (`-e`) install lets you hack on the code and pick up changes without reinstalling.
+
+Set convenient environment variables *(optional but handy)*:
 
 ```bash
 export MPATH_USERCODE="ukmp2"
@@ -66,111 +73,103 @@ export MPATH_CONNECTION_ID="290982"
 export MPATH_PRIVKEY="$HOME/.mpath_private_key.pem"
 ```
 
-## Script Overview
+---
 
-| Script                       | Purpose                                         | Output                    | Key Args (override defaults)                        |
-| ---------------------------- | ----------------------------------------------- | ------------------------- | --------------------------------------------------- |
-| `get_clients.py`             | Download raw client metadata (no flattening)    | JSON files per connection | `privkey_path`, `base_dump_dir`, `user_code`        |
-| `get_data.py`                | Download raw data and flatten to CSV            | Raw JSON + flattened CSV  | `private_key_path`, `base_dump_dir`, `user_code`    |
-| `get_interactions.py`        | Fetch & flatten interaction trees per root      | Raw JSON + CSV per root   | `privkey_path`, `out_base`, `user_code`             |
-| `get_schedule.py`            | Fetch & flatten schedule rows                   | Raw JSON + one CSV        | `privkey_path`, `out_base`, `user_code`             |
-| `merge_and_push_schedule.py` | Merge new beeps and push schedule back          | API response JSON         | `privkey_path`, `user_code`                         |
-| `schedule_json_builder.py`   | Build upload-ready schedule JSON from DataFrame | JSON                      | N/A (pure local builder)                            |
-| `set_schedule_from_json.py`  | Upload a JSON schedule file to m-Path           | API response JSON         | `privkey_path`, `user_code`, `connection_id`, flags |
+## Package‑level API
 
-## Quick-Start Notebook
-
-Open **[example.ipynb](./example.ipynb)** and run cells top-to-bottom. It demonstrates:
-
-1. Downloading client metadata.
-2. Downloading raw data and flattening to a clean DataFrame.
-3. Pulling and filtering the existing schedule.
-4. Creating new beeps and merging with the current schedule.
-5. Saving upload-ready JSON.
-6. Uploading via the API.
-
-## Common Usage Patterns
-
-### Jupyter / Python API
+After installation everything is exposed at the package root:
 
 ```python
-from pathlib import Path
-from get_clients import get_clients
-from get_data import get_data
-from get_schedule import get_schedule
-from merge_and_push_schedule import build_entries, merge_and_push
+import ema_api_handling as ema
 
-# Clients
-clients, out_dir = get_clients(
-    user_code="ukmp2",
-    base_dump_dir=Path("./clients_raw"),
-    private_key_path=Path("/keys/mpath_priv.pem")
+# Download + flatten raw data
+df = ema.download_flattened_csv(
+        user_code="ukmp2",
+        connection_id=290982,
+        privkey_path="~/.mpath_private_key.pem",
+        tz="US/Eastern"
 )
 
-# Data
-rows, data_dir = get_data(
-    user_code="ukmp2",
-    connection_id=290982,
-    base_dump_dir=Path("./mpath_data"),
-    private_key_path=Path("/keys/mpath_priv.pem")
-)
+# Pull schedule
+df_sched = ema.get_schedule(connection_id=290982)
 
-# Schedule
-df_sched = get_schedule(
-    connection_id=290982,
-    user_code="ukmp2",
-    out_base=Path("./schedule_raw"),
-    privkey_path=Path("/keys/mpath_priv.pem")
+# Build + push one new beep
+new = ema.build_entries(
+        starts=["2025‑08‑01 09:00"],
+        ends=[  "2025‑08‑01 09:15"],
+        item_id="N1m7ygNkbTTi6N8D",
+        labels=["aug01_beep"]
 )
-
-# Merge & push
-new_entries = build_entries(
-    starts=["2025-08-01 09:00:00"],
-    ends=["2025-08-01 09:15:00"],
-    item_id="N1m7ygNkbTTi6N8D",
-    labels=["aug01_beep"]
-)
-merge_and_push(
-    connection_id=290982,
-    new_entries=new_entries,
-    user_code="ukmp2",
-    privkey_path=Path("/keys/mpath_priv.pem")
-)
+ema.merge_and_push_schedule(connection_id=290982, new_entries=new)
 ```
 
-### Command Line Examples
+Use tab‑completion (`ema.<TAB>`) to discover all functions.
+
+---
+
+## Command‑line usage
+
+Every major task is also available as a console script once the package is installed:
 
 ```bash
+# Show help for any command
+get-data --help
+
 # Clients
-python get_clients.py --user_code ukmp2 --connection_id 290982 \
-  --privkey ~/.mpath_private_key.pem --out ./clients_raw
+get-clients   --user_code ukmp2 --connection_id 290982 \
+             --privkey ~/.mpath_private_key.pem   --out ./clients_raw
 
 # Data
-python get_data.py --user_code ukmp2 --connection_id 290982 \
-  --privkey ~/.mpath_private_key.pem --out ./mpath_data
+get-data      --user_code ukmp2 --connection_id 290982 \
+             --privkey ~/.mpath_private_key.pem   --out ./mpath_data
 
 # Schedule
-python get_schedule.py --user_code ukmp2 --connection_id 290982 \
-  --privkey ~/.mpath_private_key.pem --out ./schedule_raw
+get-schedule  --user_code ukmp2 --connection_id 290982 \
+             --privkey ~/.mpath_private_key.pem   --out ./schedule_raw
 
-# Upload a prepared JSON
-python set_schedule_from_json.py upload_ready_20250728T130000.json \
-  --user_code ukmp2 --connection_id 290982 --privkey ~/.mpath_private_key.pem --minimal
+# Upload prepared JSON
+set-schedule  upload_ready_20250801T0900.json \
+             --user_code ukmp2 --connection_id 290982 --minimal
 ```
 
-> Each script’s `--help` will show all flags.
+---
 
-## Troubleshooting
+## Repository layout (branch `package-refactor`)
 
-* **401 Unauthorized**: Check `user_code`, `connection_id`, JWT expiry, and private key path.
-* **Status –1 responses**: The scripts retry automatically; increase `retries` if needed.
-* **Timezone issues**: All timestamps are converted with a configurable timezone (default `US/Eastern`). Confirm your expected local zone.
+```text
+ema_api_handling/               # installable package
+├── __init__.py                 # flat API re‑exports
+├── get_data.py                 # ⇢ download_flattened_csv(), …
+├── get_clients.py              # ⇢ list_clients()
+├── get_schedule.py             # ⇢ get_schedule()
+├── get_interactions.py         # ⇢ get_interactions()
+├── merge_and_push_schedule.py  # ⇢ merge_and_push_schedule()
+├── schedule_json_builder.py    # ⇢ save_upload_json()
+├── set_schedule_from_json.py   # ⇢ set_schedule_from_json()
+└── generate_keys.py            # key‑pair helpers
+example.ipynb                   # end‑to‑end demo
+pyproject.toml                  # build metadata
+README.md
+```
+
+---
+
+## Troubleshooting tips
+
+| Symptom                   | Likely cause & fix                                                                        |
+| ------------------------- | ----------------------------------------------------------------------------------------- |
+| **401 Unauthorized**      | Wrong `user_code`, expired JWT, or wrong private key. Double‑check all three.             |
+| **Status –1** from m‑Path | Temporary network hiccup; scripts retry automatically. Increase `retries` if needed.      |
+| **Timezone confusion**    | All timestamps default to `US/Eastern`. Pass `tz="<Olson ID>"` or convert after download. |
+
+---
 
 ## License
 
-MIT License – see `LICENSE` for details.
+MIT – see `LICENSE` for full text.
+
+---
 
 ## Contact
 
-Kyunghun Lee
-[kyunghun.lee@nih.gov](mailto:kyunghun.lee@nih.gov)
+Kyunghun Lee  ·  [kyunghun.lee@nih.gov](mailto:kyunghun.lee@nih.gov)
