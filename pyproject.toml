@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ema_api_handling"
+version = "0.1.0"
+description = "Utilities for m-Path EMA API"
+readme = "README.md"
+authors = [{name="Kyunghun Lee", email="kyunghun.lee@nih.gov"}]
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = ["pandas>=2.0", "requests>=2.30", "pyjwt>=2.8"]
+
+[project.scripts]
+get-data = "ema_api_handling.get_data:main"
+
+[tool.setuptools]
+packages = ["ema_api_handling"]
