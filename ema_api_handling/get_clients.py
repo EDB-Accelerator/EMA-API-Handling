@@ -26,6 +26,18 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
+"""
+get_clients.py – download raw client metadata from m-Path and save JSON files (no flattening)
+Author: Kyunghun Lee (kyunghun.lee@nih.gov)
+
+This module exposes two public entry points:
+  • get_clients(...) – original high-level fetch that writes raw JSON payloads
+  • get_client_ids_and_aliases(...) – convenience helper that returns [(connectionId, alias), ...]
+      - accepts optional overrides (private_key_pem, base_dump_dir, base_url) without requiring MPathConfig
+      - if base_dump_dir is omitted, nothing is written to disk
+
+The CLI (python -m ema_api_handling.get_clients --help) still drives get_clients(...).
+"""
 from __future__ import annotations
 
 import argparse
@@ -47,6 +59,7 @@ __all__ = [
     "make_jwt",
     "normalize_changed_after",
     "resolve_user_code",
+    "get_client_ids_and_aliases",  # NEW
 ]
 
 # ─────────────────────────────────────────────── 0 | CONFIG
@@ -83,7 +96,7 @@ def make_jwt(user_code: str, ttl_minutes: int = 5, *, config: MPathConfig = GLOB
     Returns:
         Encoded JWT string.
     """
-    private_key = config.private_key_pem.read_text()
+    private_key = Path(config.private_key_pem).expanduser().read_text()
     exp = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
     payload = {"exp": int(exp.timestamp()), "userCode": user_code}
     return jwt.encode(payload, private_key, algorithm="RS256")
@@ -132,8 +145,6 @@ def _sanitize_url(url: str) -> str:
         return f"{head}JWT=<redacted>"
     return url
 
-
-# ─────────────────────────────────────────────── 3 | API CORE
 
 def _call_raw(endpoint: str, *, show_url: bool = False, config: MPathConfig = GLOBAL_CONFIG, **params) -> Dict:
     """Perform GET request to the specified m-Path API endpoint.
@@ -184,7 +195,7 @@ def _stamp_and_dump(body: Dict, primary_key: str, out_dir: Path, suffix: str) ->
     return rows
 
 
-# ─────────────────────────────────────────────── 4 | HIGH-LEVEL FETCH
+# ─────────────────────────────────────────────── 3 | HIGH-LEVEL FETCH
 
 def get_clients(
     user_code: str,
@@ -229,6 +240,84 @@ def get_clients(
         if status == 1:
             rows = _stamp_and_dump(body, "clients", out_dir, suffix)
             return rows, out_dir
+
+        if status == -1:
+            if attempt < max_retries:
+                print(f"API returned status –1 (attempt {attempt}/{max_retries}); retrying in 5 seconds.")
+                time.sleep(5)
+                continue
+            raise RuntimeError("API gave status –1 after max retries.")
+
+        raise RuntimeError(f"Unexpected API status: {status}\n{json.dumps(body, indent=2)}")
+
+
+# ─────────────────────────────────────────────── 4 | CONVENIENCE: IDs + ALIASES (NO MPathConfig REQUIRED)
+
+def get_client_ids_and_aliases(
+    user_code: str,
+    changed_after_utc: str | None = None,
+    *,
+    private_key_pem: str | Path | None = None,
+    base_url: str | None = None,
+    base_dump_dir: str | Path | None = None,
+    include_changed_after: bool = True,
+    max_retries: int = 3,
+    show_url: bool = False,
+) -> list[tuple[int, str]]:
+    """
+    Returns a list of (connectionId, alias) tuples. Optionally writes raw JSON if base_dump_dir is given.
+
+    This function does not require constructing MPathConfig:
+      - private_key_pem: overrides GLOBAL_CONFIG.private_key_pem if provided
+      - base_url: overrides GLOBAL_CONFIG.base_url if provided
+      - base_dump_dir: if provided, enables dumping; if None, no files are written
+    """
+    # Build a one-off config from GLOBAL_CONFIG with optional overrides
+    cfg = GLOBAL_CONFIG
+    if any([private_key_pem, base_url, base_dump_dir]):
+        cfg = replace(
+            cfg,
+            private_key_pem=Path(private_key_pem).expanduser() if private_key_pem else cfg.private_key_pem,
+            base_url=base_url or cfg.base_url,
+            base_dump_dir=Path(base_dump_dir).expanduser() if base_dump_dir else cfg.base_dump_dir,
+        )
+
+    # Prepare changedAfterUTC and dump suffix
+    if include_changed_after:
+        changed_after_utc = normalize_changed_after(changed_after_utc)
+        suffix = changed_after_utc.replace(" ", "_").replace(":", "")
+    else:
+        changed_after_utc = None
+        suffix = "all"
+
+    # Decide whether to dump or not based on base_dump_dir presence
+    do_dump = base_dump_dir is not None
+
+    for attempt in range(1, max_retries + 1):
+        token = make_jwt(user_code=user_code, config=cfg)
+        params = {"userCode": user_code, "JWT": token}
+        if include_changed_after and changed_after_utc:
+            params["changedAfterUTC"] = changed_after_utc
+
+        body = _call_raw("getClients", show_url=show_url, config=cfg, **params)
+        status = body.get("status")
+
+        if status == 1:
+            rows = body.get("clients", body.get("data", []))
+
+            # Attach timestamp + optionally dump
+            iso_now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            for r in rows:
+                r["downloadedAt"] = iso_now
+
+            if do_dump:
+                out_dir = cfg.base_dump_dir
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_file = out_dir / f"clients_{suffix}_{iso_now}.json"
+                out_file.write_text(json.dumps(body, indent=2, ensure_ascii=False))
+                print(f"✓ Raw payload saved → {out_file}")
+
+            return [(r.get("connectionId"), r.get("alias", "")) for r in rows]
 
         if status == -1:
             if attempt < max_retries:
@@ -320,116 +409,6 @@ def _cli() -> None:
     print(f"Done. Rows: {len(rows)}")
     print(f"JSON files are in: {out_dir.resolve()}")
 
-from __future__ import annotations
-import json
-import time
-from pathlib import Path
-from datetime import datetime, timedelta, timezone
-from typing import Optional
-import requests
-import jwt
-
-def _sanitize_url(url: str) -> str:
-    """Redact JWT token when printing URLs."""
-    if "JWT=" in url:
-        head, tail = url.split("JWT=", 1)
-        rest = tail.split("&", 1)
-        if len(rest) == 2:
-            _token, rest_params = rest
-            return f"{head}JWT=<redacted>&{rest_params}"
-        return f"{head}JWT=<redacted>"
-    return url
-
-def _call_raw(endpoint: str, *, show_url: bool = False, base_url: str, **params) -> dict:
-    """Perform GET request to the specified m-Path API endpoint."""
-    req = requests.Request("GET", f"{base_url}/{endpoint}", params=params)
-    prepped = req.prepare()
-    if show_url:
-        print(f"→ GET {_sanitize_url(prepped.url)}")
-    with requests.Session() as s:
-        resp = s.send(prepped, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
-
-def _make_jwt(user_code: str, private_key_pem: Path, ttl_minutes: int = 5) -> str:
-    """Generate a signed JWT for m-Path authentication."""
-    private_key = Path(private_key_pem).expanduser().read_text()
-    exp = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
-    payload = {"exp": int(exp.timestamp()), "userCode": user_code}
-    return jwt.encode(payload, private_key, algorithm="RS256")
-
-def _normalize_changed_after(dt_str: Optional[str]) -> Optional[str]:
-    """Normalize date/datetime to 'YYYY-MM-DD HH:MM:SS'."""
-    if dt_str is None:
-        return "2024-01-01 00:00:00"
-    dt_str = dt_str.strip()
-    if not dt_str:
-        return "2024-01-01 00:00:00"
-    try:
-        d = datetime.strptime(dt_str, "%Y-%m-%d")
-        return d.strftime("%Y-%m-%d 00:00:00")
-    except ValueError:
-        pass
-    try:
-        d = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-        return d.strftime("%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        raise ValueError(f"Invalid date format: {dt_str}")
-
-def get_client_ids_and_aliases(user_code: str,
-                               changed_after_utc: str | None = None,
-                               *,
-                               private_key_pem: str | Path,
-                               base_url: str = "https://dashboard.m-path.io/API2",
-                               base_dump_dir: str | Path | None = None,
-                               include_changed_after: bool = True,
-                               max_retries: int = 3,
-                               show_url: bool = False) -> list[tuple[int, str]]:
-    """
-    Return a list of (connectionId, alias) tuples from m-Path getClients API.
-    If base_dump_dir is given, also save raw JSON payload.
-    """
-    if include_changed_after:
-        changed_after_utc = _normalize_changed_after(changed_after_utc)
-        suffix = changed_after_utc.replace(" ", "_").replace(":", "")
-    else:
-        changed_after_utc = None
-        suffix = "all"
-
-    for attempt in range(1, max_retries + 1):
-        token = _make_jwt(user_code, private_key_pem)
-        params = {"userCode": user_code, "JWT": token}
-        if include_changed_after and changed_after_utc:
-            params["changedAfterUTC"] = changed_after_utc
-
-        body = _call_raw("getClients", show_url=show_url, base_url=base_url, **params)
-        status = body.get("status")
-
-        if status == 1:
-            rows = body.get("clients", body.get("data", []))
-            iso_now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            for r in rows:
-                r["downloadedAt"] = iso_now
-
-            if base_dump_dir:
-                out_dir = Path(base_dump_dir).expanduser()
-                out_dir.mkdir(parents=True, exist_ok=True)
-                out_file = out_dir / f"clients_{suffix}_{iso_now}.json"
-                out_file.write_text(json.dumps(body, indent=2, ensure_ascii=False))
-                print(f"✓ Raw payload saved → {out_file}")
-
-            return [(r.get("connectionId"), r.get("alias", "")) for r in rows]
-
-        if status == -1:
-            if attempt < max_retries:
-                print(f"API returned status –1 (attempt {attempt}/{max_retries}); retrying in 5 seconds.")
-                time.sleep(5)
-                continue
-            raise RuntimeError("API gave status –1 after max retries.")
-
-        raise RuntimeError(f"Unexpected API status: {status}\n{json.dumps(body, indent=2)}")
-
 
 if __name__ == "__main__":
     _cli()
-
