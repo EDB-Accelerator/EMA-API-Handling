@@ -22,12 +22,14 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Dict, Optional
 
 import jwt
 import requests
+from requests import RequestException, Timeout, ConnectionError as ReqConnectionError
 
 __all__ = ["set_interactions", "set_interactions_from_json"]
 
@@ -66,6 +68,34 @@ def _make_jwt(user_code: str, key_path: Path, ttl_minutes: int = 5) -> str:
     return jwt.encode(payload, key_path.read_text(), algorithm="RS256")
 
 
+# ───────────────────────── core uploader with retries
+
+def _post_set_interactions(
+    *,
+    user_code: str,
+    connection_id: int,
+    key_path: Path,
+    interactions: List[Dict],
+    base_url: str,
+    timeout: int,
+) -> Dict:
+    """Single POST call; returns parsed JSON (or raises)."""
+    payload = json.dumps(interactions, ensure_ascii=False)
+    params = {
+        "userCode": user_code,
+        "connectionId": connection_id,
+        "JWT": _make_jwt(user_code, key_path),
+        "interactionsJSON": payload,
+    }
+    resp = requests.post(f"{base_url}/setInteractions", params=params, timeout=timeout)
+    resp.raise_for_status()
+    try:
+        return resp.json()
+    except ValueError:
+        # Surface raw text for debugging if server didn't return JSON
+        raise RuntimeError(f"Non-JSON response: {resp.text[:500]}...")
+
+
 # ───────────────────────── public API
 
 def set_interactions(
@@ -76,31 +106,91 @@ def set_interactions(
     private_key_pem: Optional[Path | str] = None,
     base_url: Optional[str] = None,
     timeout: int = 30,
+    retries: int = 3,
+    backoff_seconds: int = 5,
+    verbose: bool = True,
 ) -> Dict:
     """
     Upload a replacement list of interactions (questionnaires) to m-Path.
+
+    Retries on:
+      • API body {"status": -1}
+      • network timeouts / connection errors
+      • other RequestException
+
+    Parameters
+    ----------
+    interactions : list[dict]
+    user_code : str | None
+    connection_id : int | None
+    private_key_pem : Path | str | None
+    base_url : str | None
+    timeout : int
+    retries : int
+        Total attempts = 1 + (retries - 1). Use >=1.
+    backoff_seconds : int
+        Sleep time between retry attempts.
+    verbose : bool
+        Print server reply and retry messages.
+
+    Returns
+    -------
+    dict
+        Parsed JSON reply (status==1) on success.
+
+    Raises
+    ------
+    RuntimeError on non-success status or after exhausting retries.
+    requests.HTTPError for non-2xx responses that are not retried.
     """
+    if retries < 1:
+        retries = 1
+
     user_code = user_code or _require_user_code()
     connection_id = connection_id if connection_id is not None else _resolve_connection_id()
     key_path = Path(private_key_pem).expanduser() if private_key_pem else _resolve_privkey_path()
     api_base = base_url or BASE_URL
 
-    payload = json.dumps(interactions, ensure_ascii=False)
-    params = {
-        "userCode": user_code,
-        "connectionId": connection_id,
-        "JWT": _make_jwt(user_code, key_path),
-        "interactionsJSON": payload,
-    }
+    last_err: Optional[Exception] = None
+    for attempt in range(1, retries + 1):
+        try:
+            body = _post_set_interactions(
+                user_code=user_code,
+                connection_id=connection_id,
+                key_path=key_path,
+                interactions=interactions,
+                base_url=api_base,
+                timeout=timeout,
+            )
+            if verbose:
+                print(json.dumps(body, indent=2, ensure_ascii=False))
 
-    resp = requests.post(f"{api_base}/setInteractions", params=params, timeout=timeout)
-    resp.raise_for_status()
+            status = body.get("status")
+            if status == 1:
+                return body
 
-    body = resp.json()  # raise if non-JSON
-    print(json.dumps(body, indent=2, ensure_ascii=False))
-    if body.get("status") != 1:
-        raise RuntimeError("API rejected the payload.")
-    return body
+            # Transient server state: retry on status -1
+            if status == -1 and attempt < retries:
+                if verbose:
+                    print(f"status -1; retrying … [{attempt}/{retries}]")
+                time.sleep(backoff_seconds)
+                continue
+
+            raise RuntimeError(f"API rejected the payload: {json.dumps(body, ensure_ascii=False)}")
+
+        except (Timeout, ReqConnectionError, RequestException) as e:
+            last_err = e
+            if attempt < retries:
+                if verbose:
+                    print(f"{e.__class__.__name__}: {e}. Retrying … [{attempt}/{retries}]")
+                time.sleep(backoff_seconds)
+                continue
+            raise  # bubble up the last requests exception
+
+    # If we somehow exit loop without return/raise (shouldn't happen)
+    if last_err:
+        raise last_err
+    raise RuntimeError("Failed to upload interactions (unknown error).")
 
 
 def set_interactions_from_json(
@@ -125,6 +215,9 @@ def _cli() -> None:
     ap.add_argument("--privkey", type=str, help="Path to RSA private key PEM.")
     ap.add_argument("--base-url", type=str, help="API base URL (default: env MPATH_BASE_URL or dashboard.m-path.io/API2).")
     ap.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds (default: 30).")
+    ap.add_argument("--retries", type=int, default=3, help="Number of attempts for transient failures (default: 3).")
+    ap.add_argument("--backoff", type=int, default=5, help="Seconds to wait between retries (default: 5).")
+    ap.add_argument("--no-verbose", action="store_true", help="Suppress printing server replies and retry messages.")
     args = ap.parse_args()
 
     p = Path(args.json_file).expanduser()
@@ -139,6 +232,9 @@ def _cli() -> None:
         private_key_pem=args.privkey,
         base_url=args.base_url,
         timeout=args.timeout,
+        retries=args.retries,
+        backoff_seconds=args.backoff,
+        verbose=not args.no_verbose,
     )
 
 if __name__ == "__main__":
