@@ -38,6 +38,10 @@ _EXPORTS = {
         "combine_entries",
         "save_upload_json",
     ],
+    # NEW: expose set_interactions_from_json module's set_interactions function
+    "set_interactions_from_json": [
+        "set_interactions",
+    ],
 }
 
 for _mod, _names in _EXPORTS.items():
