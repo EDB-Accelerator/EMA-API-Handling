@@ -34,6 +34,9 @@ _EXPORTS = {
         "flatten_rows",
         "flatten_and_save",
     ],
+    "set_interactions_from_json": [
+    "set_interactions",
+    ],
     "schedule_json_builder": [
         "combine_entries",
         "save_upload_json",
