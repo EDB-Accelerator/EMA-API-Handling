@@ -16,7 +16,7 @@ _EXPORTS = {
         "normalize_changed_after",
         "get_clients",
         "resolve_user_code",
-        "get_client_ids_and_aliases",  # NEW
+        "get_client_ids_and_aliases",  # NEW convenience function
     ],
     "merge_and_push_schedule": [
         "build_entries",
@@ -34,16 +34,12 @@ _EXPORTS = {
         "flatten_rows",
         "flatten_and_save",
     ],
-    "set_interactions_from_json": [
-    "set_interactions",
-    ],
     "schedule_json_builder": [
         "combine_entries",
         "save_upload_json",
     ],
-    # NEW: expose set_interactions_from_json module's set_interactions function
     "set_interactions_from_json": [
-        "set_interactions",
+        "set_interactions",  # Upload interactions from JSON file
     ],
 }
 
