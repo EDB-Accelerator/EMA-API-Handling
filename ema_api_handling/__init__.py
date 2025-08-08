@@ -1,12 +1,13 @@
 """Auto-generated flat API for ema_api_handling."""
 from importlib import import_module as _im
+
 _EXPORTS = {
     "generate_keys": [
         "detect_rc_file",
         "read_rc",
         "write_rc",
         "set_user_code",
-        "generate_keys"
+        "generate_keys",
     ],
     "get_clients": [
         "dataclass",
@@ -14,28 +15,29 @@ _EXPORTS = {
         "make_jwt",
         "normalize_changed_after",
         "get_clients",
-        "resolve_user_code"
+        "resolve_user_code",
+        "get_client_ids_and_aliases",  # NEW
     ],
     "merge_and_push_schedule": [
         "build_entries",
-        "merge_and_push"
+        "merge_and_push",
     ],
     "get_schedule": [
-        "get_schedule"
+        "get_schedule",
     ],
     "get_interactions": [
-        "get_interactions"
+        "get_interactions",
     ],
     "get_data": [
         "make_jwt",
         "get_data",
         "flatten_rows",
-        "flatten_and_save"
+        "flatten_and_save",
     ],
     "schedule_json_builder": [
         "combine_entries",
-        "save_upload_json"
-    ]
+        "save_upload_json",
+    ],
 }
 
 for _mod, _names in _EXPORTS.items():
