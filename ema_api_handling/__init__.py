@@ -39,10 +39,9 @@ _EXPORTS = {
         "save_upload_json",
     ],
     "set_interactions_from_json": [
-    "set_interactions",
-    "set_interactions_from_json",  # so you can import and call this name directly
-],
-
+        "set_interactions",
+        "set_interactions_from_json",
+    ],
 }
 
 for _mod, _names in _EXPORTS.items():
