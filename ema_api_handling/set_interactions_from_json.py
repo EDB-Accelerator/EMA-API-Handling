@@ -68,6 +68,22 @@ def _make_jwt(user_code: str, key_path: Path, ttl_minutes: int = 5) -> str:
     return jwt.encode(payload, key_path.read_text(), algorithm="RS256")
 
 
+def _normalize_interactions(obj):
+    """
+    Accepts:
+      • list[dict]                → returned as-is
+      • dict with 'interactions'  → returns that list
+      • single dict               → wraps in a list
+    """
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        if "interactions" in obj and isinstance(obj["interactions"], list):
+            return obj["interactions"]
+        return [obj]
+    raise TypeError("interactions must be a list[dict], a dict, or a dict with 'interactions' list")
+
+
 # ───────────────────────── low-level POST helpers (avoid 414)
 
 def _try_post_variants(url: str, *, form: dict, payload_min: str, timeout: int) -> requests.Response:
@@ -198,7 +214,7 @@ def set_interactions(
     connection_id = connection_id if connection_id is not None else _resolve_connection_id()
     key_path = Path(private_key_pem).expanduser() if private_key_pem else _resolve_privkey_path()
     api_base = base_url or BASE_URL
-
+    interactions = _normalize_interactions(interactions)
     last_err: Optional[Exception] = None
     for attempt in range(1, retries + 1):
         try:
@@ -272,8 +288,8 @@ def _cli() -> None:
     p = Path(args.json_file).expanduser()
     if not p.is_file():
         raise FileNotFoundError(f"{p} does not exist.")
-    interactions = json.loads(p.read_text(encoding="utf-8"))
-
+    data = json.loads(p.read_text(encoding="utf-8"))
+    interactions = _normalize_interactions(data)
     set_interactions_from_json(
         interactions,
         user_code=args.user_code,
