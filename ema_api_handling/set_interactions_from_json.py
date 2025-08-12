@@ -68,6 +68,46 @@ def _make_jwt(user_code: str, key_path: Path, ttl_minutes: int = 5) -> str:
     return jwt.encode(payload, key_path.read_text(), algorithm="RS256")
 
 
+# ───────────────────────── low-level POST helpers (avoid 414)
+
+def _try_post_variants(url: str, *, form: dict, payload_min: str, timeout: int) -> requests.Response:
+    """
+    Try several encodings so the backend accepts large interactions safely:
+      1) application/x-www-form-urlencoded  (data=)
+      2) application/json                   (json=)
+      3) multipart/form-data                (files= for interactionsJSON)
+    Returns the first response received (even if non-2xx); caller raises if needed.
+    """
+    # 1) x-www-form-urlencoded
+    try:
+        resp = requests.post(url, data=form, timeout=timeout)
+        if resp.status_code != 400 and resp.status_code != 415:
+            return resp
+    except requests.RequestException:
+        pass
+
+    # 2) JSON body
+    try:
+        resp = requests.post(url, json=form, timeout=timeout)
+        if resp.status_code != 400 and resp.status_code != 415:
+            return resp
+    except requests.RequestException:
+        pass
+
+    # 3) multipart/form-data — send large JSON as a file-like field
+    try:
+        data = {k: v for k, v in form.items() if k != "interactionsJSON"}
+        files = {
+            # filename is optional; some backends parse better when provided
+            "interactionsJSON": ("interactions.json", payload_min, "application/json"),
+        }
+        resp = requests.post(url, data=data, files=files, timeout=timeout)
+        return resp
+    except requests.RequestException as e:
+        # Bubble up; outer retry loop will handle
+        raise RuntimeError(f"Network error when posting setInteractions: {e}") from e
+
+
 # ───────────────────────── core uploader with retries
 
 def _post_set_interactions(
@@ -79,21 +119,29 @@ def _post_set_interactions(
     base_url: str,
     timeout: int,
 ) -> Dict:
-    """Single POST call; returns parsed JSON (or raises)."""
-    payload = json.dumps(interactions, ensure_ascii=False)
-    params = {
+    """
+    Single logical POST call; returns parsed JSON (or raises).
+    Sends interactions in the request body (not the URL) to avoid 414 URI Too Long.
+    """
+    # Minify JSON to reduce payload size
+    payload_min = json.dumps(interactions, ensure_ascii=False, separators=(",", ":"))
+
+    form = {
         "userCode": user_code,
-        "connectionId": connection_id,
+        "connectionId": str(connection_id),
         "JWT": _make_jwt(user_code, key_path),
-        "interactionsJSON": payload,
+        "interactionsJSON": payload_min,
     }
-    resp = requests.post(f"{base_url}/setInteractions", params=params, timeout=timeout)
+
+    url = f"{base_url}/setInteractions"
+    resp = _try_post_variants(url, form=form, payload_min=payload_min, timeout=timeout)
     resp.raise_for_status()
+
     try:
         return resp.json()
     except ValueError:
         # Surface raw text for debugging if server didn't return JSON
-        raise RuntimeError(f"Non-JSON response: {resp.text[:500]}...")
+        raise RuntimeError(f"Non-JSON response: {resp.text[:1000]}...")
 
 
 # ───────────────────────── public API
@@ -116,7 +164,7 @@ def set_interactions(
     Retries on:
       • API body {"status": -1}
       • network timeouts / connection errors
-      • other RequestException
+      • other RequestException / HTTPError (e.g., 429/5xx)
 
     Parameters
     ----------
@@ -127,7 +175,7 @@ def set_interactions(
     base_url : str | None
     timeout : int
     retries : int
-        Total attempts = 1 + (retries - 1). Use >=1.
+        Total attempts = retries (minimum 1).
     backoff_seconds : int
         Sleep time between retry attempts.
     verbose : bool
@@ -141,7 +189,7 @@ def set_interactions(
     Raises
     ------
     RuntimeError on non-success status or after exhausting retries.
-    requests.HTTPError for non-2xx responses that are not retried.
+    requests.HTTPError for non-2xx responses that are not resolved by retries.
     """
     if retries < 1:
         retries = 1
@@ -179,6 +227,7 @@ def set_interactions(
             raise RuntimeError(f"API rejected the payload: {json.dumps(body, ensure_ascii=False)}")
 
         except (Timeout, ReqConnectionError, RequestException) as e:
+            # HTTPError is a RequestException; allow retry on common transient cases
             last_err = e
             if attempt < retries:
                 if verbose:
