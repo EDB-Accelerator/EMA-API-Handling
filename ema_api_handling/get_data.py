@@ -126,7 +126,8 @@ def get_data(user_code=None,
                 time.sleep(5)
                 continue
             raise RuntimeError("API gave status –1 after max retries.")
-        raise RuntimeError(f"Unexpected API status: {status}\n{json.dumps(body, 2)}")
+        # raise RuntimeError(f"Unexpected API status: {status}\n{json.dumps(body, 2)}")
+        raise RuntimeError(f"API error:\n{json.dumps(body, indent=2)}")
 
 
 # ─────────────────────────────────────────────── 4 | FLATTEN UTILITIES
