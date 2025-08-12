@@ -62,26 +62,80 @@ def _to_scalar(v):
     return json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v
 
 # ───────────────────────────────────────────── 2 | API REQUEST
-def _fetch_interactions(user_code: str, connection_id: int, retries: int = 3,
+# def _fetch_interactions(user_code: str, connection_id: int, retries: int = 3,
+#                         privkey_path: Path = DEFAULT_PRIVKEY_PATH) -> list[dict]:
+#     """Fetch interaction data from the API with retry on status –1."""
+#     for attempt in range(1, retries + 1):
+#         params = {
+#             "userCode": user_code,
+#             "connectionId": connection_id,
+#             "JWT": _make_jwt(user_code, privkey_path=privkey_path)
+#         }
+#         body = requests.get(f"{BASE_URL}/getInteractions", params=params, timeout=30).json()
+
+#         status = body.get("status")
+#         if status == 1:
+#             return body.get("interactions", [])
+#         if status == -1 and attempt < retries:
+#             print(f"status –1; retrying … [{attempt}/{retries}]")
+#             time.sleep(5)
+#             continue
+#         # raise RuntimeError(f"API error:\n{json.dumps(body, 2)}")
+#         raise RuntimeError(f"API error:\n{json.dumps(body, indent=2)}")
+
+def _fetch_interactions(user_code: str, connection_id: int, retries: int = 10,
                         privkey_path: Path = DEFAULT_PRIVKEY_PATH) -> list[dict]:
-    """Fetch interaction data from the API with retry on status –1."""
+    """Fetch interaction data with exponential backoff and clearer errors."""
+    backoff = 3  # seconds
     for attempt in range(1, retries + 1):
         params = {
             "userCode": user_code,
             "connectionId": connection_id,
-            "JWT": _make_jwt(user_code, privkey_path=privkey_path)
+            "JWT": _make_jwt(user_code, privkey_path=privkey_path),
         }
-        body = requests.get(f"{BASE_URL}/getInteractions", params=params, timeout=30).json()
+
+        try:
+            resp = requests.get(f"{BASE_URL}/getInteractions", params=params, timeout=30)
+        except requests.RequestException as e:
+            if attempt == retries:
+                raise RuntimeError(f"Network error after {retries} attempts: {e}")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+            continue
+
+        # Try JSON; if not JSON, raise a helpful error
+        try:
+            body = resp.json()
+        except ValueError:
+            raise RuntimeError(
+                f"API error (non-JSON response): HTTP {resp.status_code}\n{resp.text[:500]}"
+            )
 
         status = body.get("status")
+
         if status == 1:
             return body.get("interactions", [])
-        if status == -1 and attempt < retries:
-            print(f"status –1; retrying … [{attempt}/{retries}]")
-            time.sleep(5)
-            continue
-        # raise RuntimeError(f"API error:\n{json.dumps(body, 2)}")
-        raise RuntimeError(f"API error:\n{json.dumps(body, indent=2)}")
+
+        if status == -1:
+            # transient/processing – retry
+            if attempt < retries:
+                wait = backoff
+                print(f"status –1; retrying in {wait}s … [{attempt}/{retries}]")
+                time.sleep(wait)
+                backoff = min(backoff * 2, 60)
+                continue
+            # ran out of retries
+            raise RuntimeError(
+                "API kept returning status –1 (transient). "
+                "Server may still be processing or throttling. Try again later or increase retries."
+            )
+
+        # Any other status → include body for debugging
+        raise RuntimeError(
+            "Unexpected API status: "
+            f"{status}\n{json.dumps(body, indent=2, ensure_ascii=False)}"
+        )
+
 
 # ───────────────────────────────────────────── 3 | FLATTEN TREE
 def _walk(item: dict, path: list[str], rows: list[dict]):
