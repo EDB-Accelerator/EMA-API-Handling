@@ -80,7 +80,8 @@ def _fetch_interactions(user_code: str, connection_id: int, retries: int = 3,
             print(f"status –1; retrying … [{attempt}/{retries}]")
             time.sleep(5)
             continue
-        raise RuntimeError(f"API error:\n{json.dumps(body, 2)}")
+        # raise RuntimeError(f"API error:\n{json.dumps(body, 2)}")
+        raise RuntimeError(f"API error:\n{json.dumps(body, indent=2)}")
 
 # ───────────────────────────────────────────── 3 | FLATTEN TREE
 def _walk(item: dict, path: list[str], rows: list[dict]):
