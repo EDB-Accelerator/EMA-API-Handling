@@ -180,15 +180,9 @@ def _flatten_and_save_roots(roots: list[dict], connection_id: int, out_dir: Path
                             tz: str = "US/Eastern") -> dict[str, pd.DataFrame]:
     """
     Flatten each root container and save CSV per root.
-
-    Args:
-        roots: List of root interaction containers.
-        connection_id: m-Path connection ID.
-        out_dir: Target output directory.
-        tz: Timezone for timestamp conversion.
-
-    Returns:
-        dict: Mapping of root title to corresponding DataFrame.
+    Also saves:
+      • interactions_<connection_id>_<timestamp>.json  (all roots, raw)
+      • <idx>_<slug>_<timestamp>_raw.json             (per-root, raw)
     """
     ts = _stamp_and_dump(roots, f"interactions_{connection_id}", out_dir)
     dfs: dict[str, pd.DataFrame] = {}
@@ -198,9 +192,20 @@ def _flatten_and_save_roots(roots: list[dict], connection_id: int, out_dir: Path
         return dfs
 
     for idx, root in enumerate(roots, 1):
-        title = root.get("fullQuestion") or root.get("shortQuestion") or root.get("itemId") or f"root{idx}"
+        title = (root.get("fullQuestion")
+                 or root.get("shortQuestion")
+                 or root.get("itemId")
+                 or f"root{idx}")
+
+        # --- NEW: save per-root raw JSON (unflattened) ---
+        raw_fp = out_dir / f"{idx:02d}_{_slug(title)}_{ts}_raw.json"
+        raw_fp.write_text(json.dumps(root, indent=2, ensure_ascii=False))
+        print(f"  ├─ raw JSON → {raw_fp}")
+
+        # Flatten to rows/columns
         df = _questions_df(root)
 
+        # Localize/format timestamp-like numeric columns if present
         ts_cols = [c for c in df.columns if ("timeStamp" in c) and df[c].dtype != "object"]
         if ts_cols:
             df[ts_cols] = (
@@ -210,13 +215,16 @@ def _flatten_and_save_roots(roots: list[dict], connection_id: int, out_dir: Path
                   .unstack()
             )
 
+        # Save CSV per root
         fn = f"{idx:02d}_{_slug(title)}_{ts}_{len(df)}rows.csv"
         fp = out_dir / fn
         df.to_csv(fp, index=False)
-        print(f"  └─ root {idx}: {len(df)} questions → {fp}")
+        print(f"  └─ CSV ({len(df)} rows) → {fp}")
+
         dfs[title] = df
 
     return dfs
+
 
 # ───────────────────────────────────────────── 5 | PUBLIC FUNCTION
 def get_interactions(*,
