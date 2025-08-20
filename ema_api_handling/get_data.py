@@ -47,7 +47,13 @@ def make_jwt(user_code, ttl_minutes: int = 5, private_key_path: Path = DEFAULT_P
     Returns:
         str: Encoded JWT string.
     """
-    private_key = DEFAULT_PRIVATE_KEY_PEM.read_text()
+    # private_key = DEFAULT_PRIVATE_KEY_PEM.read_text()
+    # private_key = DEFAULT_PRIVATE_KEY_PEM.read_text()
+    key_path = Path(private_key_path).expanduser()
+    if not key_path.exists():
+        raise FileNotFoundError(f"Private key not found at: {key_path}")
+    private_key = key_path.read_text()
+
     exp = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
     payload = {"exp": int(exp.timestamp()), "userCode": user_code}
     return jwt.encode(payload, private_key, algorithm="RS256")
