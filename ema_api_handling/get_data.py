@@ -171,7 +171,6 @@ def get_data(user_code: str | None = None,
     raise RuntimeError("get_data failed for an unknown reason.")
 
 # ─────────────────────────────────────────────── A | ONE-TAB JSON→CSV (FORMAL)
-from __future__ import annotations
 from pathlib import Path
 from datetime import datetime, timezone
 import json, time
