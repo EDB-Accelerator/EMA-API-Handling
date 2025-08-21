@@ -97,13 +97,17 @@ def _stamp_and_dump(body: dict, key: str, connection_id: int, conn_dir: Path) ->
     print(f"✓ Raw payload saved → {out_json}")
     return body[key]
 
-def get_data(user_code=None,
-             connection_id=None,
+def get_data(user_code: str | None = None,
+             connection_id: int | None = None,
              max_retries: int = 3,
              base_dump_dir: Path = DEFAULT_BASE_DUMP_DIR,
-             private_key_path: Path = DEFAULT_PRIVATE_KEY_PEM) -> tuple[list[dict], Path]:
+             private_key_path: Path = DEFAULT_PRIVATE_KEY_PEM,
+             save_csv: bool = True,
+             tz: str = "US/Eastern"
+            ) -> tuple[list[dict], Path, Path | None]:
     """
-    Fetch raw data from m-Path API with retry logic.
+    Fetch raw data from m-Path API with retry logic, optionally produce a clean CSV,
+    and return the path to that CSV.
 
     Args:
         user_code (str): m-Path user code.
@@ -111,29 +115,65 @@ def get_data(user_code=None,
         max_retries (int): Number of retry attempts on failure.
         base_dump_dir (Path): Base directory for output files.
         private_key_path (Path): Path to PEM private key.
+        save_csv (bool): If True, flatten rows and write a CSV immediately.
+        tz (str): Timezone used when localizing any millisecond timestamps.
 
     Returns:
-        tuple: (List of raw data rows, output directory path)
+        tuple:
+            - raw_rows (list[dict]): Raw rows from the API (with 'downloadedAt' added).
+            - conn_dir (Path): Directory where raw/clean files are written.
+            - csv_path (Path | None): Path to the saved CSV if save_csv=True, else None.
     """
+    if user_code is None:
+        raise ValueError("user_code must be provided.")
+    if connection_id is None:
+        raise ValueError("connection_id must be provided.")
+
     conn_dir = base_dump_dir / str(connection_id)
     conn_dir.mkdir(parents=True, exist_ok=True)
 
+    last_error: Exception | None = None
+
     for attempt in range(1, max_retries + 1):
-        token = make_jwt(user_code=user_code, private_key_path=private_key_path)
-        body = _call_raw("getData", userCode=user_code, JWT=token, connectionId=connection_id)
+        try:
+            token = make_jwt(user_code=user_code, private_key_path=private_key_path)
+            body = _call_raw("getData", userCode=user_code, JWT=token, connectionId=connection_id)
 
-        status = body.get("status")
-        if status == 1:
-            return _stamp_and_dump(body, "data", connection_id, conn_dir), conn_dir
+            status = body.get("status")
+            if status == 1:
+                # Save raw payload to JSON and extract rows
+                raw_rows = _stamp_and_dump(body, "data", connection_id, conn_dir)
 
-        if status == -1:
+                csv_path: Path | None = None
+                if save_csv:
+                    # Flatten and write clean CSV; timestamp localization uses tz
+                    _, csv_path = flatten_and_save(raw_rows, connection_id, conn_dir, tz=tz)
+
+                return raw_rows, conn_dir, csv_path
+
+            if status == -1:
+                if attempt < max_retries:
+                    print(f"API returned status –1 (attempt {attempt}/{max_retries}); retrying in 5 seconds.")
+                    time.sleep(5)
+                    continue
+                raise RuntimeError("API gave status –1 after max retries.")
+
+            # Any other status is treated as an error
+            raise RuntimeError(f"API error:\n{json.dumps(body, indent=2)}")
+
+        except Exception as e:
+            last_error = e
             if attempt < max_retries:
-                print(f"API returned status –1 (attempt {attempt}/{max_retries}); retrying in 5 seconds.")
+                print(f"Attempt {attempt}/{max_retries} failed: {e}\nRetrying in 5 seconds...")
                 time.sleep(5)
                 continue
-            raise RuntimeError("API gave status –1 after max retries.")
-        # raise RuntimeError(f"Unexpected API status: {status}\n{json.dumps(body, 2)}")
-        raise RuntimeError(f"API error:\n{json.dumps(body, indent=2)}")
+            # Exhausted retries
+            raise
+
+    # Should be unreachable; keeps type checkers happy
+    if last_error:
+        raise last_error
+    raise RuntimeError("get_data failed for an unknown reason.")
 
 
 # ─────────────────────────────────────────────── 4 | FLATTEN UTILITIES
