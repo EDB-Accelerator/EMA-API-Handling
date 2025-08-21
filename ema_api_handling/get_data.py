@@ -96,6 +96,79 @@ def _stamp_and_dump(body: dict, key: str, connection_id: int, conn_dir: Path) ->
     out_json.write_text(json.dumps(body, indent=2, ensure_ascii=False))
     print(f"✓ Raw payload saved → {out_json}")
     return body[key]
+# ─────────────────────────────────────────────── B | get_data RETURNS JSON & CSV PATHS
+def get_data(user_code: str | None = None,
+             connection_id: int | None = None,
+             max_retries: int = 3,
+             base_dump_dir: Path = DEFAULT_BASE_DUMP_DIR,
+             private_key_path: Path = DEFAULT_PRIVATE_KEY_PEM,
+             save_csv: bool = True,
+             local_tz: str = "US/Eastern",
+             timestamp_origin: str = "local"
+            ) -> tuple[list[dict], Path, Path | None, Path]:
+    """
+    Fetch raw data from m-Path API with retry logic, write the raw JSON,
+    optionally produce a clean CSV, and return:
+        (raw_rows, conn_dir, csv_path or None, json_path)
+
+    - timestamp_origin: "local" (most likely for m-Path) or "utc".
+    """
+    if user_code is None:
+        raise ValueError("user_code must be provided.")
+    if connection_id is None:
+        raise ValueError("connection_id must be provided.")
+
+    conn_dir = base_dump_dir / str(connection_id)
+    conn_dir.mkdir(parents=True, exist_ok=True)
+
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            token = make_jwt(user_code=user_code, private_key_path=private_key_path)
+            body = _call_raw("getData", userCode=user_code, JWT=token, connectionId=connection_id)
+
+            status = body.get("status")
+            if status == 1:
+                # 1) Save raw payload to JSON with a stable filename pattern
+                utc_now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                json_path = conn_dir / f"data_{connection_id}_{utc_now}.json"
+                json_path.write_text(json.dumps(body, indent=2, ensure_ascii=False), encoding="utf-8")
+                print(f"✓ Raw payload saved → {json_path}")
+
+                # 2) Extract rows and (optionally) write clean CSV via the one-tab function
+                raw_rows = body.get("data", [])
+                csv_path: Path | None = None
+                if save_csv:
+                    _, csv_path = json_to_clean_csv(
+                        json_path=json_path,
+                        local_tz=local_tz,
+                        timestamp_origin=timestamp_origin
+                    )
+
+                return raw_rows, conn_dir, csv_path, json_path
+
+            if status == -1:
+                if attempt < max_retries:
+                    print(f"API returned status –1 (attempt {attempt}/{max_retries}); retrying in 5 seconds.")
+                    time.sleep(5)
+                    continue
+                raise RuntimeError("API gave status –1 after max retries.")
+
+            # Any other status is treated as an error
+            raise RuntimeError(f"API error:\n{json.dumps(body, indent=2)}")
+
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                print(f"Attempt {attempt}/{max_retries} failed: {e}\nRetrying in 5 seconds...")
+                time.sleep(5)
+                continue
+            raise
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("get_data failed for an unknown reason.")
 
 # ─────────────────────────────────────────────── A | ONE-TAB JSON→CSV (FORMAL)
 from __future__ import annotations
