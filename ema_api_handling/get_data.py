@@ -97,144 +97,115 @@ def _stamp_and_dump(body: dict, key: str, connection_id: int, conn_dir: Path) ->
     print(f"✓ Raw payload saved → {out_json}")
     return body[key]
 
-def get_data(user_code: str | None = None,
-             connection_id: int | None = None,
-             max_retries: int = 3,
-             base_dump_dir: Path = DEFAULT_BASE_DUMP_DIR,
-             private_key_path: Path = DEFAULT_PRIVATE_KEY_PEM,
-             save_csv: bool = True,
-             tz: str = "US/Eastern"
-            ) -> tuple[list[dict], Path, Path | None]:
-    """
-    Fetch raw data from m-Path API with retry logic, optionally produce a clean CSV,
-    and return the path to that CSV.
+# ─────────────────────────────────────────────── A | ONE-TAB JSON→CSV (FORMAL)
+from __future__ import annotations
+from pathlib import Path
+from datetime import datetime, timezone
+import json, time
+import pandas as pd
 
-    Args:
-        user_code (str): m-Path user code.
-        connection_id (int): Connection ID to retrieve data for.
-        max_retries (int): Number of retry attempts on failure.
-        base_dump_dir (Path): Base directory for output files.
-        private_key_path (Path): Path to PEM private key.
-        save_csv (bool): If True, flatten rows and write a CSV immediately.
-        tz (str): Timezone used when localizing any millisecond timestamps.
-
-    Returns:
-        tuple:
-            - raw_rows (list[dict]): Raw rows from the API (with 'downloadedAt' added).
-            - conn_dir (Path): Directory where raw/clean files are written.
-            - csv_path (Path | None): Path to the saved CSV if save_csv=True, else None.
-    """
-    if user_code is None:
-        raise ValueError("user_code must be provided.")
-    if connection_id is None:
-        raise ValueError("connection_id must be provided.")
-
-    conn_dir = base_dump_dir / str(connection_id)
-    conn_dir.mkdir(parents=True, exist_ok=True)
-
-    last_error: Exception | None = None
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            token = make_jwt(user_code=user_code, private_key_path=private_key_path)
-            body = _call_raw("getData", userCode=user_code, JWT=token, connectionId=connection_id)
-
-            status = body.get("status")
-            if status == 1:
-                # Save raw payload to JSON and extract rows
-                raw_rows = _stamp_and_dump(body, "data", connection_id, conn_dir)
-
-                csv_path: Path | None = None
-                if save_csv:
-                    # Flatten and write clean CSV; timestamp localization uses tz
-                    _, csv_path = flatten_and_save(raw_rows, connection_id, conn_dir, tz=tz)
-
-                return raw_rows, conn_dir, csv_path
-
-            if status == -1:
-                if attempt < max_retries:
-                    print(f"API returned status –1 (attempt {attempt}/{max_retries}); retrying in 5 seconds.")
-                    time.sleep(5)
-                    continue
-                raise RuntimeError("API gave status –1 after max retries.")
-
-            # Any other status is treated as an error
-            raise RuntimeError(f"API error:\n{json.dumps(body, indent=2)}")
-
-        except Exception as e:
-            last_error = e
-            if attempt < max_retries:
-                print(f"Attempt {attempt}/{max_retries} failed: {e}\nRetrying in 5 seconds...")
-                time.sleep(5)
-                continue
-            # Exhausted retries
-            raise
-
-    # Should be unreachable; keeps type checkers happy
-    if last_error:
-        raise last_error
-    raise RuntimeError("get_data failed for an unknown reason.")
-
-
-# ─────────────────────────────────────────────── 4 | FLATTEN UTILITIES
+# Utilities already used elsewhere
 def _to_scalar(val):
-    """Convert list or dict to JSON string, leave scalars unchanged."""
     return json.dumps(val, ensure_ascii=False) if isinstance(val, (list, dict)) else val
 
 def _flatten_answer(ans: dict, rec: dict, prefix: str):
-    """
-    Flatten a single answer block into a flat dictionary format.
-    
-    Recursively handles nested containerAnswer structures.
-    """
     for k, v in ans.items():
         if k in ("basicQuestion", "cAnswer"):
             continue
         rec[f"{prefix}{k}"] = _to_scalar(v)
-
     bq = ans.get("basicQuestion", {})
     for subk, subv in bq.items():
         rec[f"{prefix}basicQuestion_{subk}"] = _to_scalar(subv)
-
     for valkey in ("iAnswer", "dAnswer", "sAnswer"):
         if valkey in ans and ans[valkey]:
             rec[f"{prefix}value"] = ans[valkey][0]
             break
-
     if ans.get("typeAnswer") == "containerAnswer":
         for child in ans.get("cAnswer", []):
             child_sq = child.get("basicQuestion", {}).get("shortQuestion", "container")
             _flatten_answer(child, rec, f"{prefix}{child_sq}_")
 
 def flatten_rows(raw_rows: list[dict]) -> pd.DataFrame:
-    """
-    Convert list of raw m-Path rows to a flat tabular DataFrame.
-
-    Args:
-        raw_rows (list): Raw JSON response entries.
-
-    Returns:
-        pd.DataFrame: Flattened DataFrame.
-    """
-    flattened = []
+    flat = []
     for entry in raw_rows:
-        row: dict = {}
-
+        row = {}
         for k, v in entry.items():
             if k != "data":
                 row[k] = _to_scalar(v)
-
-        inner = entry["data"]
+        inner = entry.get("data", {})
         for k, v in inner.items():
             if k != "answers":
                 row[f"data_{k}"] = _to_scalar(v)
-
         for ans in inner.get("answers", []):
             sq = ans.get("basicQuestion", {}).get("shortQuestion", "Q")
             _flatten_answer(ans, row, f"{sq}_")
+        flat.append(row)
+    return pd.DataFrame(flat)
 
-        flattened.append(row)
-    return pd.DataFrame(flattened)
+def _load_rows_from_json(json_path: Path) -> list[dict]:
+    if not json_path.exists():
+        raise FileNotFoundError(f"JSON not found: {json_path}")
+    obj = json.loads(json_path.read_text(encoding="utf-8"))
+    if isinstance(obj, dict) and "data" in obj:
+        return obj.get("data", [])
+    if isinstance(obj, list):
+        return obj
+    raise ValueError("Unrecognized JSON structure (expected dict with 'data' or list).")
+
+def _convert_timestamp_columns(df: pd.DataFrame,
+                               tz_str: str = "US/Eastern",
+                               origin: str = "local") -> pd.DataFrame:
+    """
+    Convert ms-epoch columns named like *timeStamp*/*timestamp*.
+    origin='local': treat ms as local wall time -> tz_localize (no shift)
+    origin='utc'  : treat ms as UTC -> tz_convert (shift to local)
+    """
+    cand = [c for c in df.columns if ("timeStamp" in c or "timestamp" in c)]
+    num  = [c for c in cand if pd.api.types.is_numeric_dtype(df[c])]
+    if not num:
+        return df
+
+    for c in num:
+        try:
+            if origin == "utc":
+                dt = pd.to_datetime(df[c], unit="ms", utc=True).dt.tz_convert(tz_str)
+            else:  # origin == "local"
+                dt = pd.to_datetime(df[c], unit="ms").dt.tz_localize(
+                    tz_str, nonexistent="shift_forward", ambiguous="NaT"
+                )
+            df[c] = dt.dt.strftime("%Y-%m-%d %H:%M:%S%z")
+        except Exception as e:
+            print(f"[WARN] Failed to convert '{c}': {e}")
+    return df
+
+def json_to_clean_csv(json_path: Path,
+                      local_tz: str = "US/Eastern",
+                      timestamp_origin: str = "local",
+                      out_dir: Path | None = None,
+                      out_name: str | None = None
+                     ) -> tuple[pd.DataFrame, Path]:
+    """
+    Load m-Path JSON (dict with 'data' or list), flatten to a DataFrame,
+    convert timestamp columns with the requested semantics, write CSV, and return (df, csv_path).
+    """
+    raw_rows = _load_rows_from_json(json_path)
+    df = flatten_rows(raw_rows)
+    df = _convert_timestamp_columns(df, tz_str=local_tz, origin=timestamp_origin)
+
+    # Output path default: sibling to JSON, using your "__clean_{N}rows.csv" convention
+    out_dir = Path(out_dir) if out_dir else json_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if out_name:
+        csv_path = out_dir / out_name
+    else:
+        # Keep your convention e.g., "data_294502_20250820T160619Z__clean_123rows.csv"
+        stem = json_path.stem  # e.g., "data_294502_20250820T160619Z"
+        csv_path = out_dir / f"{stem}__clean_{len(df)}rows.csv"
+
+    df.to_csv(csv_path, index=False)
+    print(f"✓ Clean CSV saved → {csv_path}")
+    return df, csv_path
+
 
 def flatten_and_save(raw_rows: list[dict], connection_id: int,
                      conn_dir: Path, tz: str = "US/Eastern"
