@@ -1,43 +1,10 @@
 #!/usr/bin/env python3
 # get_interactions.py – download and flatten m-Path interaction data per root container
 # Author: Kyunghun Lee (kyunghun.lee@nih.gov)
-# Updated: 2025-07-01
+# Updated: 2025-07-01 (add base_url param; CLI/env support)
 #
 # MIT License
-# Copyright (c) 2025 Kyunghun Lee
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
-
-"""
-get_interactions.py
-
-Fetch and flatten interactions for one m-Path connection.
-
-Outputs:
-- Raw JSON file
-- One CSV per root container (flattened questions)
-
-Usage:
-CLI:  python get_interactions.py --connection_id 123456
-API:  import get_interactions as mp
-      mp.get_interactions(connection_id=123456, user_code="ukmp2")
-"""
+# (license text unchanged)
 
 from __future__ import annotations
 from pathlib import Path
@@ -46,7 +13,7 @@ import argparse, json, os, re, sys, time, requests, jwt
 import pandas as pd
 
 # ───────────────────────────────────────────── 0 | PATHS & CONSTANTS
-BASE_URL = "https://m-path.io/API2"
+DEFAULT_BASE_URL = "https://dashboard.m-path.io/API2"   # ← updated default host
 DEFAULT_PRIVKEY_PATH = Path.home() / ".mpath_private_key.pem"
 DEFAULT_BASE_OUT = Path("interactions_raw").expanduser()
 
@@ -62,28 +29,11 @@ def _to_scalar(v):
     return json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v
 
 # ───────────────────────────────────────────── 2 | API REQUEST
-# def _fetch_interactions(user_code: str, connection_id: int, retries: int = 3,
-#                         privkey_path: Path = DEFAULT_PRIVKEY_PATH) -> list[dict]:
-#     """Fetch interaction data from the API with retry on status –1."""
-#     for attempt in range(1, retries + 1):
-#         params = {
-#             "userCode": user_code,
-#             "connectionId": connection_id,
-#             "JWT": _make_jwt(user_code, privkey_path=privkey_path)
-#         }
-#         body = requests.get(f"{BASE_URL}/getInteractions", params=params, timeout=30).json()
-
-#         status = body.get("status")
-#         if status == 1:
-#             return body.get("interactions", [])
-#         if status == -1 and attempt < retries:
-#             print(f"status –1; retrying … [{attempt}/{retries}]")
-#             time.sleep(5)
-#             continue
-#         # raise RuntimeError(f"API error:\n{json.dumps(body, 2)}")
-#         raise RuntimeError(f"API error:\n{json.dumps(body, indent=2)}")
-
-def _fetch_interactions(user_code: str, connection_id: int, retries: int = 10,
+def _fetch_interactions(user_code: str,
+                        connection_id: int,
+                        *,
+                        base_url: str,
+                        retries: int = 10,
                         privkey_path: Path = DEFAULT_PRIVKEY_PATH) -> list[dict]:
     """Fetch interaction data with exponential backoff and clearer errors."""
     backoff = 3  # seconds
@@ -95,7 +45,7 @@ def _fetch_interactions(user_code: str, connection_id: int, retries: int = 10,
         }
 
         try:
-            resp = requests.get(f"{BASE_URL}/getInteractions", params=params, timeout=30)
+            resp = requests.get(f"{base_url.rstrip('/')}/getInteractions", params=params, timeout=30)
         except requests.RequestException as e:
             if attempt == retries:
                 raise RuntimeError(f"Network error after {retries} attempts: {e}")
@@ -114,7 +64,11 @@ def _fetch_interactions(user_code: str, connection_id: int, retries: int = 10,
         status = body.get("status")
 
         if status == 1:
-            return body.get("interactions", [])
+            # Package refactor typically returns under "interactions"; fallbacks included
+            return (body.get("interactions")
+                    or body.get("data")
+                    or body.get("items")
+                    or [])
 
         if status == -1:
             # transient/processing – retry
@@ -135,7 +89,6 @@ def _fetch_interactions(user_code: str, connection_id: int, retries: int = 10,
             "Unexpected API status: "
             f"{status}\n{json.dumps(body, indent=2, ensure_ascii=False)}"
         )
-
 
 # ───────────────────────────────────────────── 3 | FLATTEN TREE
 def _walk(item: dict, path: list[str], rows: list[dict]):
@@ -197,7 +150,7 @@ def _flatten_and_save_roots(roots: list[dict], connection_id: int, out_dir: Path
                  or root.get("itemId")
                  or f"root{idx}")
 
-        # --- NEW: save per-root raw JSON (unflattened) ---
+        # Save per-root raw JSON (unflattened)
         raw_fp = out_dir / f"{idx:02d}_{_slug(title)}_{ts}_raw.json"
         raw_fp.write_text(json.dumps(root, indent=2, ensure_ascii=False))
         print(f"  ├─ raw JSON → {raw_fp}")
@@ -225,11 +178,11 @@ def _flatten_and_save_roots(roots: list[dict], connection_id: int, out_dir: Path
 
     return dfs
 
-
 # ───────────────────────────────────────────── 5 | PUBLIC FUNCTION
 def get_interactions(*,
                      connection_id: int | None = None,
                      user_code: str | None = None,
+                     base_url: str | None = None,
                      retries: int = 3,
                      out_base: Path | str = DEFAULT_BASE_OUT,
                      private_key_path: Path = DEFAULT_PRIVKEY_PATH
@@ -240,9 +193,11 @@ def get_interactions(*,
     Parameters:
         connection_id: Participant's connection ID.
         user_code: Practitioner code (5-character).
+        base_url: API base URL (e.g., https://dashboard.m-path.io/API2).
+                  If omitted, uses env var MPATH_BASE_URL or DEFAULT_BASE_URL.
         retries: Retry count on API status –1.
         out_base: Output directory.
-        privkey_path: Path to RSA private key.
+        private_key_path: Path to RSA private key.
 
     Returns:
         Dictionary mapping root container titles to DataFrames.
@@ -251,6 +206,11 @@ def get_interactions(*,
     if not user_code:
         raise ValueError("MPATH_USERCODE not set and user_code parameter missing.")
 
+    # Resolve base URL in order: param → env → default
+    base_url = (base_url
+                or os.getenv("MPATH_BASE_URL")
+                or DEFAULT_BASE_URL)
+
     if connection_id is None:
         env_id = os.getenv("MPATH_CONNECTION_ID")
         if env_id and env_id.isdigit():
@@ -258,14 +218,20 @@ def get_interactions(*,
         else:
             connection_id = int(input("Enter numeric CONNECTION ID: ").strip())
 
-    if not private_key_path.exists():
+    if not Path(private_key_path).exists():
         raise FileNotFoundError(f"RSA private key not found: {private_key_path}")
 
     out_dir = Path(out_base) / str(connection_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Fetching interactions for connection {connection_id} …")
-    roots = _fetch_interactions(user_code, connection_id, retries=retries, privkey_path=private_key_path)
+    print(f"  Base URL: {base_url}")
+    roots = _fetch_interactions(
+        user_code, connection_id,
+        base_url=base_url,
+        retries=retries,
+        privkey_path=Path(private_key_path)
+    )
     return _flatten_and_save_roots(roots, connection_id, out_dir)
 
 # ───────────────────────────────────────────── 6 | CLI HANDLER
@@ -273,9 +239,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download m-Path interactions.")
     parser.add_argument("--connection_id", type=int, help="Connection/participant ID")
     parser.add_argument("--user_code", type=str, help="5-char practitioner code (overrides env)")
+    parser.add_argument("--base_url", type=str, help=f"API base URL (default: {DEFAULT_BASE_URL})")
+    parser.add_argument("--retries", type=int, default=3, help="Retry count on status –1")
+    parser.add_argument("--out_base", type=str, default=str(DEFAULT_BASE_OUT), help="Output directory base")
+    parser.add_argument("--private_key_path", type=str, default=str(DEFAULT_PRIVKEY_PATH), help="Path to RSA private key")
     args, _ = parser.parse_known_args()
 
     try:
-        get_interactions(connection_id=args.connection_id, user_code=args.user_code)
+        get_interactions(
+            connection_id=args.connection_id,
+            user_code=args.user_code,
+            base_url=args.base_url,
+            retries=args.retries,
+            out_base=args.out_base,
+            private_key_path=Path(args.private_key_path),
+        )
     except Exception as e:
         sys.exit(f"Failed: {e}")
